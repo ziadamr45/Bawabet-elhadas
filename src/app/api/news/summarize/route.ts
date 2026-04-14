@@ -1,9 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { summarizeArticle, verifyArticle, rankArticles, isOllamaAvailable } from '@/lib/ollama';
+import {
+  summarizeArticle,
+  verifyArticle,
+  rankArticles,
+  isHuggingFaceAvailable,
+} from '@/lib/huggingface';
 
-// ============ AI ENDPOINT (Ollama-Powered) ============
+// ============ AI ENDPOINT (Hugging Face Powered) ============
 // Handles AI summarization, verification, and importance ranking
-// Uses LOCAL Ollama runtime - no API keys, no quotas, works offline
+// Uses FREE Hugging Face Inference API — no billing required
 
 export async function POST(request: NextRequest) {
   try {
@@ -32,7 +37,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // ============ FAKE NEWS DETECTION ============
+    // ============ FAKE NEWS / QUALITY DETECTION ============
     if (action === 'verify') {
       try {
         const result = await verifyArticle(title || '', snippet || '');
