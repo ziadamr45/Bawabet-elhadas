@@ -3,7 +3,6 @@
 import { Search, Menu, X, Newspaper, Globe } from 'lucide-react';
 import { CATEGORIES, CategoryId, COUNTRIES, CountryCode } from '@/lib/utils';
 import ThemeToggle from './ThemeToggle';
-import UserMenu from './auth/UserMenu';
 import { useState } from 'react';
 
 interface HeaderProps {
@@ -82,7 +81,6 @@ export default function Header({ activeCategory, onCategoryChange, onSearchOpen,
               )}
             </div>
 
-            <UserMenu />
             <ThemeToggle />
             <button
               onClick={onSearchOpen}

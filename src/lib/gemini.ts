@@ -4,12 +4,8 @@
 // Works on both local dev and Vercel deployment
 // ============================================================
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
-
-// Model configuration
-const GEMINI_MODEL = 'gemini-2.0-flash'; // Fast and free tier model
-const GEMINI_MODEL_PRO = 'gemini-2.0-flash'; // Using flash for all tasks (cost-effective)
+const GEMINI_MODEL = 'gemini-2.0-flash';
 
 interface GeminiResponse {
   candidates?: Array<{
@@ -23,7 +19,16 @@ interface GeminiResponse {
   error?: {
     code?: number;
     message?: string;
+    status?: string;
   };
+}
+
+/**
+ * Get the Gemini API key at runtime (not at module load time)
+ * This ensures env vars are properly loaded on Vercel
+ */
+function getApiKey(): string {
+  return process.env.GEMINI_API_KEY || '';
 }
 
 /**
@@ -37,13 +42,14 @@ async function callGemini(
     maxTokens?: number;
   } = {}
 ): Promise<string> {
-  if (!GEMINI_API_KEY) {
+  const apiKey = getApiKey();
+  if (!apiKey) {
     throw new Error('GEMINI_API_KEY is not set. Please add it to your environment variables.');
   }
 
   const { temperature = 0.3, maxTokens = 200 } = options;
 
-  const url = `${GEMINI_BASE_URL}/models/${GEMINI_MODEL_PRO}:generateContent?key=${GEMINI_API_KEY}`;
+  const url = `${GEMINI_BASE_URL}/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
 
   const body = {
     system_instruction: {
@@ -63,6 +69,8 @@ async function callGemini(
     },
   };
 
+  console.log('[Gemini] Calling API for:', userPrompt.substring(0, 50) + '...');
+
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -71,16 +79,19 @@ async function callGemini(
 
   if (!response.ok) {
     const errorText = await response.text();
+    console.error('[Gemini] API error:', response.status, errorText);
     throw new Error(`Gemini API error (${response.status}): ${errorText}`);
   }
 
   const data: GeminiResponse = await response.json();
 
   if (data.error) {
+    console.error('[Gemini] Response error:', data.error);
     throw new Error(`Gemini API error: ${data.error.message}`);
   }
 
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  console.log('[Gemini] Response received, length:', text.length);
   return text.trim();
 }
 
@@ -144,5 +155,5 @@ export async function rankArticles(titles: string[]): Promise<number[]> {
  * Check if Gemini API is configured
  */
 export function isGeminiConfigured(): boolean {
-  return !!GEMINI_API_KEY;
+  return !!getApiKey();
 }
