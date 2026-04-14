@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Noto_Sans_Arabic } from "next/font/google";
 import "./globals.css";
 import AuthProvider from "@/components/auth/AuthProvider";
+import NotificationPrompt from "@/components/NotificationPrompt";
 
 const notoArabic = Noto_Sans_Arabic({
   variable: "--font-noto-arabic",
@@ -30,6 +31,7 @@ export default function RootLayout({
       >
         <AuthProvider>
           {children}
+          <NotificationPrompt />
         </AuthProvider>
       </body>
     </html>
