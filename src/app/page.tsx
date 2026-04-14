@@ -44,6 +44,22 @@ export default function Home() {
 
   const handleArticleClick = useCallback((article: NewsArticle) => {
     trackClick(article.category, article.source);
+    // Track interaction in database (fire and forget)
+    fetch('/api/interactions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: 'anonymous',
+        articleUrl: article.url,
+        articleTitle: article.title,
+        type: 'click',
+        category: article.category,
+        source: article.source,
+        image: article.image,
+        snippet: article.snippet,
+        date: article.date,
+      }),
+    }).catch(() => {});
   }, [trackClick]);
 
   const handleSearch = useCallback(async (query: string) => {

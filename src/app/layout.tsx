@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Noto_Sans_Arabic } from "next/font/google";
 import "./globals.css";
+import AuthProvider from "@/components/auth/AuthProvider";
 
 const notoArabic = Noto_Sans_Arabic({
   variable: "--font-noto-arabic",
@@ -27,7 +28,9 @@ export default function RootLayout({
       <body
         className={`${notoArabic.variable} antialiased bg-background text-foreground font-[family-name:var(--font-noto-arabic)]`}
       >
-        {children}
+        <AuthProvider>
+          {children}
+        </AuthProvider>
       </body>
     </html>
   );

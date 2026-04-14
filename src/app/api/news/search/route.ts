@@ -2,8 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import ZAI from 'z-ai-web-dev-sdk';
 import { getCached, setCache, deduplicateArticles, NewsArticle } from '@/lib/utils';
 
-const GNEWS_API_KEY = 'b72cdb0d6660d4c8f9e1473f412eba10';
-const NEWSDATA_API_KEY = 'pub_5c1937c7d1644a008e976e4131a12fe6';
+const GNEWS_API_KEY = process.env.GNEWS_API_KEY || 'b72cdb0d6660d4c8f9e1473f412eba10';
+const NEWSDATA_API_KEY = process.env.NEWSDATA_API_KEY || 'pub_5c1937c7d1644a008e976e4131a12fe6';
 
 export async function GET(request: NextRequest) {
   try {

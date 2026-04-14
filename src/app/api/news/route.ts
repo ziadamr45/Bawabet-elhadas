@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import ZAI from 'z-ai-web-dev-sdk';
-import { CATEGORIES, deduplicateArticles, getCached, setCache, generateId, NewsArticle } from '@/lib/utils';
+import { CATEGORIES, deduplicateArticles, getCached, setCache, NewsArticle } from '@/lib/utils';
+import { prisma } from '@/lib/prisma';
 
 // ============ API KEYS ============
-const GNEWS_API_KEY = 'b72cdb0d6660d4c8f9e1473f412eba10';
-const NEWSDATA_API_KEY = 'pub_5c1937c7d1644a008e976e4131a12fe6';
+const GNEWS_API_KEY = process.env.GNEWS_API_KEY || 'b72cdb0d6660d4c8f9e1473f412eba10';
+const NEWSDATA_API_KEY = process.env.NEWSDATA_API_KEY || 'pub_5c1937c7d1644a008e976e4131a12fe6';
 
 // ============ SOURCE 1: GNews API ============
 async function fetchGNews(category: string, country: string, searchQuery?: string): Promise<NewsArticle[]> {
@@ -202,6 +203,42 @@ export async function GET(request: NextRequest) {
 
     // ============ CACHE RESULTS ============
     setCache(cacheKey, enhanced);
+
+    // ============ CACHE ARTICLES IN DATABASE FOR TRENDING ============
+    try {
+      for (const article of enhanced.slice(0, 15)) {
+        await prisma.article.upsert({
+          where: { url: article.url },
+          update: {
+            title: article.title,
+            snippet: article.snippet,
+            image: article.image || null,
+            source: article.source,
+            category: article.category,
+            country: country,
+            publishedAt: article.date ? new Date(article.date) : new Date(),
+            importanceScore: article.importanceScore || null,
+            qualityScore: article.qualityScore || null,
+            expiresAt: new Date(Date.now() + 12 * 60 * 60 * 1000),
+          },
+          create: {
+            url: article.url,
+            title: article.title,
+            snippet: article.snippet,
+            image: article.image || null,
+            source: article.source,
+            category: article.category,
+            country: country,
+            publishedAt: article.date ? new Date(article.date) : new Date(),
+            importanceScore: article.importanceScore || null,
+            qualityScore: article.qualityScore || null,
+            expiresAt: new Date(Date.now() + 12 * 60 * 60 * 1000),
+          },
+        }).catch(() => {});
+      }
+    } catch {
+      // Ignore DB cache errors
+    }
 
     return NextResponse.json({
       articles: enhanced,

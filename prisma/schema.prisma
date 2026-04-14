@@ -1,32 +1,157 @@
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
+// ============ USER SYSTEM ============
 model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  name      String?
+  id            String    @id @default(cuid())
+  email         String    @unique
+  name          String?
+  image         String?
+  emailVerified DateTime?
+  
+  // Preferences
+  preferredCategories String[] @default(["politics", "technology", "sports"])
+  preferredCountry    String   @default("eg")
+  
+  // OAuth
+  accounts     Account[]
+  sessions     Session[]
+  interactions Interaction[]
+  readingHistory ReadingHistory[]
+  
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
 
-model Post {
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String  @id @default(cuid())
+  sessionToken String  @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ============ INTERACTION TRACKING ============
+model Interaction {
   id        String   @id @default(cuid())
-  title     String
-  content   String?
-  published Boolean  @default(false)
-  authorId  String
+  userId    String
+  articleUrl String
+  articleTitle String
+  
+  // Interaction type
+  type      String   // "click", "view", "read", "share", "bookmark"
+  
+  // Context
+  category  String?
+  source    String?
+  country   String?
+  
+  // Reading metrics
+  readTimeSeconds Int @default(0)
+  
+  // Timestamp
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([articleUrl])
+  @@index([type, createdAt])
+}
+
+// ============ READING HISTORY ============
+model ReadingHistory {
+  id        String   @id @default(cuid())
+  userId    String
+  articleUrl String
+  articleTitle String
+  articleImage String?
+  articleSource String?
+  articleCategory String?
+  articleSnippet String?
+  articleDate String?
+  
+  readCount Int      @default(1)
+  totalReadTime Int  @default(0)
+  bookmarked Boolean @default(false)
+  
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, articleUrl])
+  @@index([userId, updatedAt])
+}
+
+// ============ ARTICLE CACHE ============
+model Article {
+  id          String   @id @default(cuid())
+  url         String   @unique
+  title       String
+  snippet     String?
+  content     String?
+  image       String?
+  source      String?
+  category    String?
+  country     String?
+  language    String   @default("ar")
+  publishedAt DateTime?
+  
+  // AI generated fields
+  aiSummary      String?
+  importanceScore Int?
+  qualityScore   Int?
+  
+  // Trending metrics
+  viewCount   Int      @default(0)
+  clickCount  Int      @default(0)
+  shareCount  Int      @default(0)
+  
+  // Cache management
+  fetchedAt   DateTime @default(now())
+  expiresAt   DateTime
+  
+  @@index([category, publishedAt])
+  @@index([country, publishedAt])
+  @@index([publishedAt])
+  @@index([viewCount])
+  @@index([clickCount])
 }
