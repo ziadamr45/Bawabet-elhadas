@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import ZAI from 'z-ai-web-dev-sdk';
+import { getZAI } from '@/lib/zai';
 import { getCached, setCache, deduplicateArticles, NewsArticle } from '@/lib/utils';
 import { prisma } from '@/lib/prisma';
 
@@ -87,7 +87,7 @@ export async function GET() {
 
       // Web Search trending
       (async () => {
-        const zai = await ZAI.create();
+        const zai = await getZAI();
         const result = await zai.functions.invoke('web_search', { query: 'أخبار عاجلة اليوم', num: 8 });
         if (!Array.isArray(result)) return [];
         return result

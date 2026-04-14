@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import ZAI from 'z-ai-web-dev-sdk';
+import { getZAI } from '@/lib/zai';
 import { CATEGORIES, deduplicateArticles, getCached, setCache, NewsArticle } from '@/lib/utils';
 import { prisma } from '@/lib/prisma';
 
@@ -86,7 +86,7 @@ async function fetchNewsData(category: string, country: string, searchQuery?: st
 // ============ SOURCE 3: Web Search (Z-AI) ============
 async function fetchWebSearch(category: string, searchQuery?: string): Promise<NewsArticle[]> {
   try {
-    const zai = await ZAI.create();
+    const zai = await getZAI();
     const cat = CATEGORIES.find((c) => c.id === category);
     const query = searchQuery || cat?.query || 'أهم الأخبار اليوم';
 
@@ -169,7 +169,7 @@ export async function GET(request: NextRequest) {
     let enhanced = paginated;
     if (aiEnhance && paginated.length > 0) {
       try {
-        const zai = await ZAI.create();
+        const zai = await getZAI();
         // Batch score articles using AI (top 5 only to save API calls)
         const topArticles = paginated.slice(0, 5);
         const titlesText = topArticles.map((a, i) => `${i + 1}. ${a.title}`).join('\n');

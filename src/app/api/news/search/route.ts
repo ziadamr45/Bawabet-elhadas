@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import ZAI from 'z-ai-web-dev-sdk';
+import { getZAI } from '@/lib/zai';
 import { getCached, setCache, deduplicateArticles, NewsArticle } from '@/lib/utils';
 
 const GNEWS_API_KEY = process.env.GNEWS_API_KEY || 'b72cdb0d6660d4c8f9e1473f412eba10';
@@ -63,7 +63,7 @@ export async function GET(request: NextRequest) {
 
       // Web search
       (async () => {
-        const zai = await ZAI.create();
+        const zai = await getZAI();
         const result = await zai.functions.invoke('web_search', {
           query: `أخبار ${query}`,
           num: 10,
