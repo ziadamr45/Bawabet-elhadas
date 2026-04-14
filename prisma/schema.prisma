@@ -21,12 +21,15 @@ model User {
   // Preferences
   preferredCategories String[] @default(["politics", "technology", "sports"])
   preferredCountry    String   @default("eg")
+  notificationEnabled Boolean  @default(true)
+  notificationTypes   String[] @default(["breaking", "personalized"])  // breaking, personalized, digest
   
   // OAuth
   accounts     Account[]
   sessions     Session[]
   interactions Interaction[]
   readingHistory ReadingHistory[]
+  deviceTokens   DeviceToken[]
   
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -144,6 +147,7 @@ model Article {
   viewCount   Int      @default(0)
   clickCount  Int      @default(0)
   shareCount  Int      @default(0)
+  trendingScore Float  @default(0)  // Computed trending score (0-100)
   
   // Cache management
   fetchedAt   DateTime @default(now())
@@ -154,4 +158,60 @@ model Article {
   @@index([publishedAt])
   @@index([viewCount])
   @@index([clickCount])
+  @@index([trendingScore])
+}
+
+// ============ NOTIFICATION SYSTEM ============
+
+// User device tokens for push notifications
+model DeviceToken {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique  // FCM device token
+  platform  String   @default("web")  // web, ios, android
+  userAgent String?
+  isActive  Boolean  @default(true)
+  
+  userId String
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  @@index([userId])
+  @@index([isActive])
+}
+
+// Notification log (sent notifications history)
+model NotificationLog {
+  id          String   @id @default(cuid())
+  userId      String?  // null = broadcast
+  articleUrl  String?
+  articleTitle String?
+  articleImage String?
+  type        String   // "breaking", "personalized", "digest"
+  title       String   // Notification title
+  body        String   // Notification body
+  data        Json?    // Extra data payload
+  
+  // Delivery tracking
+  status      String   @default("pending")  // pending, sent, delivered, failed
+  sentAt      DateTime @default(now())
+  deliveredAt DateTime?
+  failureReason String?
+  
+  @@index([userId, sentAt])
+  @@index([type, sentAt])
+  @@index([status])
+}
+
+// Daily digest tracking
+model DailyDigest {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  lastSent  DateTime?
+  articleIds String[] @default([])  // IDs of articles included in last digest
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
