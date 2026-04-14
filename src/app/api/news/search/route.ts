@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getZAI } from '@/lib/zai';
 import { getCached, setCache, deduplicateArticles, NewsArticle } from '@/lib/utils';
 
 const GNEWS_API_KEY = process.env.GNEWS_API_KEY || 'b72cdb0d6660d4c8f9e1473f412eba10';
@@ -21,8 +20,8 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ articles: cached, query });
     }
 
-    // Fetch from all 3 sources in parallel
-    const [gnewsResult, newsdataResult, webSearchResult] = await Promise.allSettled([
+    // Fetch from 2 sources in parallel
+    const [gnewsResult, newsdataResult] = await Promise.allSettled([
       // GNews search
       (async () => {
         const url = `https://gnews.io/api/v4/search?q=${encodeURIComponent(query)}&lang=ar&max=10&token=${GNEWS_API_KEY}`;
@@ -60,37 +59,13 @@ export async function GET(request: NextRequest) {
           category: 'search',
         }));
       })(),
-
-      // Web search
-      (async () => {
-        const zai = await getZAI();
-        const result = await zai.functions.invoke('web_search', {
-          query: `أخبار ${query}`,
-          num: 10,
-        });
-        if (!Array.isArray(result)) return [];
-        return result
-          .filter((item: any) => item?.name && item?.url)
-          .map((item: any, i: number) => ({
-            id: `web-search-${i}-${Date.now()}`,
-            title: item.name || '',
-            snippet: item.snippet || '',
-            url: item.url || '',
-            image: '',
-            source: item.host_name || '',
-            favicon: item.favicon || '',
-            date: item.date || '',
-            category: 'search',
-          }));
-      })(),
     ]);
 
     const gnews = gnewsResult.status === 'fulfilled' ? gnewsResult.value : [];
     const newsdata = newsdataResult.status === 'fulfilled' ? newsdataResult.value : [];
-    const websearch = webSearchResult.status === 'fulfilled' ? webSearchResult.value : [];
 
     // Merge, deduplicate, sort by date
-    const all = deduplicateArticles([...gnews, ...newsdata, ...websearch]);
+    const all = deduplicateArticles([...gnews, ...newsdata]);
     const sorted = all.sort((a, b) => {
       const dateA = a.date ? new Date(a.date).getTime() : 0;
       const dateB = b.date ? new Date(b.date).getTime() : 0;

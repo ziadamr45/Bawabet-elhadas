@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getZAI } from '@/lib/zai';
 import { CATEGORIES, deduplicateArticles, getCached, setCache, NewsArticle } from '@/lib/utils';
 import { prisma } from '@/lib/prisma';
+import { isGeminiConfigured, rankArticles } from '@/lib/gemini';
 
 // ============ API KEYS ============
 const GNEWS_API_KEY = process.env.GNEWS_API_KEY || 'b72cdb0d6660d4c8f9e1473f412eba10';
@@ -83,41 +83,6 @@ async function fetchNewsData(category: string, country: string, searchQuery?: st
   }
 }
 
-// ============ SOURCE 3: Web Search (Z-AI) ============
-async function fetchWebSearch(category: string, searchQuery?: string): Promise<NewsArticle[]> {
-  try {
-    const zai = await getZAI();
-    const cat = CATEGORIES.find((c) => c.id === category);
-    const query = searchQuery || cat?.query || 'أهم الأخبار اليوم';
-
-    const result = await zai.functions.invoke('web_search', {
-      query,
-      num: 10,
-    });
-
-    if (!Array.isArray(result)) return [];
-
-    return result
-      .filter((item: any) => item?.name && item?.url)
-      .map((item: any, i: number) => ({
-        id: `web-${category}-${i}-${Date.now()}`,
-        title: item.name || '',
-        snippet: item.snippet || '',
-        url: item.url || '',
-        image: '', // Web search doesn't return images
-        source: item.host_name || '',
-        favicon: item.favicon || '',
-        date: item.date || '',
-        category,
-        importanceScore: undefined,
-        qualityScore: undefined,
-      }));
-  } catch (error) {
-    console.error('Web Search fetch error:', error);
-    return [];
-  }
-}
-
 // ============ MAIN HANDLER ============
 export async function GET(request: NextRequest) {
   try {
@@ -135,20 +100,18 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ articles: cached, category, country, page, cached: true });
     }
 
-    // ============ PARALLEL FETCHING FROM ALL 3 SOURCES ============
-    const [gnewsArticles, newsdataArticles, webSearchArticles] = await Promise.allSettled([
+    // ============ PARALLEL FETCHING FROM 2 SOURCES ============
+    const [gnewsArticles, newsdataArticles] = await Promise.allSettled([
       fetchGNews(category, country, search || undefined),
       fetchNewsData(category, country, search || undefined),
-      fetchWebSearch(category, search || undefined),
     ]);
 
-    // Extract results (handle settled promises)
+    // Extract results
     const gnews = gnewsArticles.status === 'fulfilled' ? gnewsArticles.value : [];
     const newsdata = newsdataArticles.status === 'fulfilled' ? newsdataArticles.value : [];
-    const websearch = webSearchArticles.status === 'fulfilled' ? webSearchArticles.value : [];
 
     // ============ MERGE ALL ARTICLES ============
-    const allArticles = [...gnews, ...newsdata, ...websearch];
+    const allArticles = [...gnews, ...newsdata];
 
     // ============ DEDUPLICATION ============
     const deduplicated = deduplicateArticles(allArticles);
@@ -167,30 +130,11 @@ export async function GET(request: NextRequest) {
 
     // ============ AI ENHANCEMENT (optional, for importance scoring) ============
     let enhanced = paginated;
-    if (aiEnhance && paginated.length > 0) {
+    if (aiEnhance && paginated.length > 0 && isGeminiConfigured()) {
       try {
-        const zai = await getZAI();
-        // Batch score articles using AI (top 5 only to save API calls)
         const topArticles = paginated.slice(0, 5);
-        const titlesText = topArticles.map((a, i) => `${i + 1}. ${a.title}`).join('\n');
-        
-        const completion = await zai.chat.completions.create({
-          messages: [
-            {
-              role: 'system',
-              content: 'أنت نظام تقييم أخبار. قم بتقييم أهمية كل خبر من 1 إلى 10. أجب فقط بالأرقام مفصولة بفواصل. مثال: 8,5,9,3,7',
-            },
-            {
-              role: 'user',
-              content: `قيّم أهمية هذه الأخبار من 1-10:\n${titlesText}`,
-            },
-          ],
-          temperature: 0.1,
-          max_tokens: 100,
-        });
-
-        const scoresText = completion.choices?.[0]?.message?.content || '';
-        const scores = scoresText.split(/[,\s]+/).map(Number).filter((n: number) => !isNaN(n) && n >= 1 && n <= 10);
+        const titles = topArticles.map((a) => a.title);
+        const scores = await rankArticles(titles);
         
         enhanced = paginated.map((article, i) => ({
           ...article,
@@ -249,7 +193,6 @@ export async function GET(request: NextRequest) {
       sources: {
         gnews: gnews.length,
         newsdata: newsdata.length,
-        websearch: websearch.length,
       },
     });
   } catch (error: any) {
