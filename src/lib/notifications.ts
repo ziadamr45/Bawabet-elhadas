@@ -1,22 +1,38 @@
 // ============================================================
-// بوابة الحدث - Firebase Cloud Messaging (FCM) Notification System
+// بوابة الحدث - Web Push Notification System (VAPID)
+// Uses: web-push library (no Firebase/FCM needed)
 // Handles: Breaking News, Personalized, Daily Digest
 // Anti-spam: Max 5 notifications/day per user
 // ============================================================
 
+import webpush from 'web-push';
 import { prisma } from '@/lib/prisma';
 import { getTrendingArticles, isBreakingNews } from '@/lib/trending';
-import { getCached, setCache } from '@/lib/utils';
 
-// ============ CONFIGURATION ============
-const FCM_SERVER_KEY = process.env.FCM_SERVER_KEY || process.env.NEXT_PUBLIC_FCM_SERVER_KEY || '';
-const FCM_ENDPOINT = 'https://fcm.googleapis.com/fcm/send';
+// ============ VAPID CONFIGURATION ============
+const VAPID_PUBLIC_KEY = process.env.NEXT_PUBLIC_VAPID_KEY || '';
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
+const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'mailto:admin@bawabet-elhadas.com';
+
+// Configure web-push
+if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+  webpush.setVapidDetails(
+    VAPID_SUBJECT,
+    VAPID_PUBLIC_KEY,
+    VAPID_PRIVATE_KEY
+  );
+  console.log(`[WebPush] Configured with VAPID key (${VAPID_PUBLIC_KEY.substring(0, 8)}...)`);
+} else {
+  console.warn(
+    '[WebPush] VAPID keys not set. Push notifications are disabled.' +
+    '\n     To enable: Add NEXT_PUBLIC_VAPID_KEY and VAPID_PRIVATE_KEY to .env'
+  );
+}
 
 // Anti-spam limits
 const MAX_NOTIFICATIONS_PER_DAY = 5;
 const MAX_BREAKING_PER_DAY = 3;
-const DIGEST_HOUR = 8; // Send daily digest at 8 AM (user's timezone)
-const DIGEST_COOLDOWN_HOURS = 20; // Don't re-send digest within 20h
+const DIGEST_COOLDOWN_HOURS = 20;
 
 // ============ TYPES ============
 export type NotificationType = 'breaking' | 'personalized' | 'digest';
@@ -37,13 +53,17 @@ export interface SendResult {
   errors: string[];
 }
 
+export interface WebPushSubscription {
+  endpoint: string;
+  keys: {
+    p256dh: string;
+    auth: string;
+  };
+}
+
 // ============ DAILY LIMIT TRACKER ============
 const dailyTracker = new Map<string, { count: number; lastReset: number }>();
 
-/**
- * Check and enforce daily notification limit for a user.
- * Returns true if user can still receive notifications today.
- */
 export function canSendNotification(userId: string, type: NotificationType): boolean {
   const key = `${userId}:${new Date().toISOString().split('T')[0]}`;
   const tracker = dailyTracker.get(key);
@@ -53,7 +73,6 @@ export function canSendNotification(userId: string, type: NotificationType): boo
     return true;
   }
 
-  // Stricter limit for breaking news
   const limit = type === 'breaking' ? MAX_BREAKING_PER_DAY : MAX_NOTIFICATIONS_PER_DAY;
   return tracker.count < limit;
 }
@@ -68,127 +87,88 @@ function incrementNotificationCount(userId: string): void {
   }
 }
 
-// ============ CORE: SEND FCM NOTIFICATION ============
+// ============ CORE: SEND WEB PUSH NOTIFICATION ============
 
-/**
- * Send a push notification via Firebase Cloud Messaging.
- *
- * @param token - FCM device token
- * @param payload - Notification content (title, body, icon, data)
- * @returns success/failure status
- */
-async function sendFCM(
-  token: string,
+function isConfigured(): boolean {
+  return !!(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY);
+}
+
+async function sendWebPush(
+  subscription: WebPushSubscription,
   payload: NotificationPayload
 ): Promise<{ success: boolean; error?: string }> {
-  if (!FCM_SERVER_KEY) {
-    console.warn('[FCM] FCM_SERVER_KEY not configured. Notification not sent.');
-    return { success: false, error: 'FCM not configured' };
+  if (!isConfigured()) {
+    return { success: false, error: 'WebPush not configured' };
   }
 
   try {
-    const message = {
-      to: token,
-      notification: {
-        title: payload.title,
-        body: payload.body,
-        icon: payload.icon || '/favicon-news.png',
-        image: payload.image || undefined,
-      },
-      data: {
-        url: payload.url || '',
-        type: 'news',
-        ...payload.data,
-      },
-      webpush: {
-        fcm_options: {
-          link: payload.url || '/',
-        },
-        notification: {
-          icon: payload.icon || '/favicon-news.png',
-          badge: '/favicon-news.png',
-          vibrate: [100, 50, 100],
-          actions: [
-            { action: 'open', title: 'اقرأ الخبر' },
-            { action: 'dismiss', title: 'إغلاق' },
-          ],
-        },
-      },
-      apns: {
-        payload: {
-          aps: {
-            sound: 'default',
-            badge: 1,
-          },
-        },
-      },
-    };
-
-    const response = await fetch(FCM_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Authorization': `key=${FCM_SERVER_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(message),
-      timeout: 10_000,
+    const pushPayload = JSON.stringify({
+      title: payload.title,
+      body: payload.body,
+      icon: payload.icon || '/favicon-news.png',
+      image: payload.image || undefined,
+      badge: '/favicon-news.png',
+      url: payload.url || '/',
+      data: payload.data || {},
+      vibrate: [100, 50, 100],
+      actions: [
+        { action: 'open', title: 'اقرأ الخبر' },
+        { action: 'dismiss', title: 'إغلاق' },
+      ],
     });
 
-    const result = await response.json();
+    await webpush.sendNotification(subscription, pushPayload, {
+      TTL: 86400, // 24 hours
+      urgency: 'normal',
+    });
 
-    if (!response.ok) {
-      const errorMsg = result.error || `HTTP ${response.status}`;
-      console.error(`[FCM] Send failed for token ${token.substring(0, 12)}...:`, errorMsg);
-
-      // If token is invalid/unregistered, mark it inactive
-      if (
-        result.error === 'NotRegistered' ||
-        result.error === 'InvalidRegistration' ||
-        response.status === 404
-      ) {
-        await deactivateToken(token);
-      }
-
-      return { success: false, error: errorMsg };
-    }
-
-    // Check for failure in successful response
-    if (result.failure === 1 && result.results?.[0]?.error) {
-      const error = result.results[0].error;
-      if (error === 'NotRegistered' || error === 'InvalidRegistration') {
-        await deactivateToken(token);
-      }
-      return { success: false, error };
-    }
-
-    console.log(`[FCM] ✅ Sent to ${token.substring(0, 12)}...: "${payload.title}"`);
+    console.log(`[WebPush] Sent to ${subscription.endpoint.substring(0, 50)}...: "${payload.title}"`);
     return { success: true };
   } catch (error: any) {
-    console.error('[FCM] Send error:', error.message);
+    const statusCode = error.statusCode;
+
+    // If subscription is invalid/expired, mark it inactive
+    if (statusCode === 404 || statusCode === 410) {
+      console.warn(`[WebPush] Subscription expired (HTTP ${statusCode}), deactivating...`);
+      await deactivateSubscription(subscription.endpoint);
+      return { success: false, error: `Subscription expired (${statusCode})` };
+    }
+
+    console.error(`[WebPush] Send error:`, error.message);
     return { success: false, error: error.message };
   }
 }
 
-/**
- * Mark a device token as inactive (invalidated).
- */
-async function deactivateToken(token: string): Promise<void> {
+async function deactivateSubscription(endpoint: string): Promise<void> {
   try {
     await prisma.deviceToken.updateMany({
-      where: { token, isActive: true },
+      where: { endpoint, isActive: true },
       data: { isActive: false },
     });
-    console.log(`[FCM] Token ${token.substring(0, 12)}... marked inactive`);
+    console.log(`[WebPush] Subscription deactivated: ${endpoint.substring(0, 50)}...`);
   } catch {
     // Ignore DB errors
   }
 }
 
+// ============ HELPER: Convert DB record to WebPushSubscription ============
+
+function toWebPushSubscription(device: {
+  endpoint: string;
+  keys_p256dh: string;
+  keys_auth: string;
+}): WebPushSubscription {
+  return {
+    endpoint: device.endpoint,
+    keys: {
+      p256dh: device.keys_p256dh,
+      auth: device.keys_auth,
+    },
+  };
+}
+
 // ============ PUBLIC API: SEND NOTIFICATION TO USER ============
 
-/**
- * Send a notification to a specific user on all their active devices.
- */
 export async function sendToUser(
   userId: string,
   payload: NotificationPayload,
@@ -196,8 +176,12 @@ export async function sendToUser(
 ): Promise<SendResult> {
   const result: SendResult = { success: false, sentCount: 0, failedCount: 0, errors: [] };
 
+  if (!isConfigured()) {
+    result.errors.push('WebPush not configured');
+    return result;
+  }
+
   try {
-    // Check if user has notifications enabled
     const user = await prisma.user.findUnique({
       where: { id: userId },
       select: {
@@ -210,31 +194,32 @@ export async function sendToUser(
       return result;
     }
 
-    // Check if user wants this type of notification
     if (!user.notificationTypes.includes(type)) {
       return result;
     }
 
-    // Anti-spam check
     if (!canSendNotification(userId, type)) {
       result.errors.push('Daily notification limit reached');
       return result;
     }
 
-    // Get active device tokens
-    const tokens = await prisma.deviceToken.findMany({
+    const devices = await prisma.deviceToken.findMany({
       where: { userId, isActive: true },
-      select: { token: true },
+      select: {
+        endpoint: true,
+        keys_p256dh: true,
+        keys_auth: true,
+      },
     });
 
-    if (tokens.length === 0) {
-      result.errors.push('No active device tokens');
+    if (devices.length === 0) {
+      result.errors.push('No active subscriptions');
       return result;
     }
 
-    // Send to all devices in parallel
-    const sendPromises = tokens.map(async ({ token }) => {
-      const res = await sendFCM(token, payload);
+    const sendPromises = devices.map(async (device) => {
+      const subscription = toWebPushSubscription(device);
+      const res = await sendWebPush(subscription, payload);
       if (res.success) {
         result.sentCount++;
       } else {
@@ -245,7 +230,6 @@ export async function sendToUser(
 
     await Promise.all(sendPromises);
 
-    // Log the notification
     if (result.sentCount > 0) {
       await prisma.notificationLog.create({
         data: {
@@ -274,45 +258,49 @@ export async function sendToUser(
 
 // ============ PUBLIC API: BROADCAST NOTIFICATION ============
 
-/**
- * Send a notification to ALL users with active device tokens.
- * Used for major breaking news events.
- */
 export async function broadcastNotification(
   payload: NotificationPayload,
   type: NotificationType = 'breaking'
 ): Promise<SendResult> {
   const result: SendResult = { success: false, sentCount: 0, failedCount: 0, errors: [] };
 
+  if (!isConfigured()) {
+    result.errors.push('WebPush not configured');
+    return result;
+  }
+
   try {
-    // Get all active tokens (batch to avoid memory issues)
     let skip = 0;
     const batchSize = 500;
     let hasMore = true;
 
     while (hasMore) {
-      const tokens = await prisma.deviceToken.findMany({
+      const devices = await prisma.deviceToken.findMany({
         where: { isActive: true },
-        select: { token: true, userId: true },
+        select: {
+          endpoint: true,
+          keys_p256dh: true,
+          keys_auth: true,
+          userId: true,
+        },
         skip,
         take: batchSize,
       });
 
-      if (tokens.length === 0) break;
-      hasMore = tokens.length === batchSize;
+      if (devices.length === 0) break;
+      hasMore = devices.length === batchSize;
       skip += batchSize;
 
-      // Send in parallel (max 50 concurrent)
-      for (let i = 0; i < tokens.length; i += 50) {
-        const batch = tokens.slice(i, i + 50);
-        const promises = batch.map(async ({ token, userId }) => {
-          // Check per-user limits
-          if (!canSendNotification(userId, type)) return;
+      for (let i = 0; i < devices.length; i += 50) {
+        const batch = devices.slice(i, i + 50);
+        const promises = batch.map(async (device) => {
+          if (!canSendNotification(device.userId, type)) return;
 
-          const res = await sendFCM(token, payload);
+          const subscription = toWebPushSubscription(device);
+          const res = await sendWebPush(subscription, payload);
           if (res.success) {
             result.sentCount++;
-            incrementNotificationCount(userId);
+            incrementNotificationCount(device.userId);
           } else {
             result.failedCount++;
           }
@@ -322,11 +310,10 @@ export async function broadcastNotification(
       }
     }
 
-    // Log broadcast
     if (result.sentCount > 0) {
       await prisma.notificationLog.create({
         data: {
-          userId: null, // null = broadcast
+          userId: null,
           articleUrl: payload.url || null,
           articleTitle: payload.title,
           articleImage: payload.image || null,
@@ -340,7 +327,7 @@ export async function broadcastNotification(
       result.success = true;
     }
 
-    console.log(`[FCM] Broadcast: sent=${result.sentCount}, failed=${result.failedCount}`);
+    console.log(`[WebPush] Broadcast: sent=${result.sentCount}, failed=${result.failedCount}`);
     return result;
   } catch (error: any) {
     result.errors.push(error.message);
@@ -350,16 +337,6 @@ export async function broadcastNotification(
 
 // ============ 1. BREAKING NEWS NOTIFICATION ============
 
-/**
- * Check for breaking news articles and send notifications.
- * Should be called periodically (e.g., every 15-30 minutes via cron).
- *
- * Logic:
- * - Get articles with high engagement from the last 3 hours
- * - Filter using isBreakingNews() criteria
- * - Skip articles already sent as notifications (check logs)
- * - Send to users who have "breaking" notifications enabled
- */
 export async function checkAndSendBreakingNews(): Promise<{
   checked: number;
   sent: number;
@@ -368,12 +345,11 @@ export async function checkAndSendBreakingNews(): Promise<{
   let sent = 0;
 
   try {
-    if (!FCM_SERVER_KEY) {
-      console.log('[FCM] Breaking news check skipped: FCM not configured');
+    if (!isConfigured()) {
+      console.log('[WebPush] Breaking news check skipped: WebPush not configured');
       return { checked: 0, sent: 0 };
     }
 
-    // Get recent articles with engagement
     const recentArticles = await prisma.article.findMany({
       where: {
         publishedAt: { gte: new Date(Date.now() - 3 * 60 * 60 * 1000) },
@@ -386,7 +362,6 @@ export async function checkAndSendBreakingNews(): Promise<{
 
     if (recentArticles.length === 0) return { checked: 0, sent: 0 };
 
-    // Get recently notified article URLs (last 3 hours) to avoid duplicates
     const recentNotified = await prisma.notificationLog.findMany({
       where: {
         type: 'breaking',
@@ -400,13 +375,9 @@ export async function checkAndSendBreakingNews(): Promise<{
     for (const article of recentArticles) {
       checked++;
 
-      // Skip if already notified
       if (notifiedUrls.has(article.url)) continue;
-
-      // Check if qualifies as breaking news
       if (!isBreakingNews(article)) continue;
 
-      // Prepare notification
       const payload: NotificationPayload = {
         title: '⚡ عاجل',
         body: article.title,
@@ -420,21 +391,19 @@ export async function checkAndSendBreakingNews(): Promise<{
         },
       };
 
-      // Broadcast to all users with breaking news enabled
       const result = await broadcastNotification(payload, 'breaking');
 
       if (result.success) {
         sent++;
-        console.log(`[FCM] Breaking news sent: "${article.title.substring(0, 50)}..."`);
+        console.log(`[WebPush] Breaking news sent: "${article.title.substring(0, 50)}..."`);
       }
 
-      // Rate limit: max 1 breaking notification per check cycle
       if (sent >= 1) break;
     }
 
-    console.log(`[FCM] Breaking news check: ${checked} articles checked, ${sent} notifications sent`);
+    console.log(`[WebPush] Breaking news check: ${checked} checked, ${sent} sent`);
   } catch (error: any) {
-    console.error('[FCM] Breaking news check error:', error.message);
+    console.error('[WebPush] Breaking news check error:', error.message);
   }
 
   return { checked, sent };
@@ -442,10 +411,6 @@ export async function checkAndSendBreakingNews(): Promise<{
 
 // ============ 2. PERSONALIZED NOTIFICATION ============
 
-/**
- * Send personalized notifications based on user interests.
- * Finds top articles in user's preferred categories and sends alerts.
- */
 export async function sendPersonalizedNotifications(): Promise<{
   usersProcessed: number;
   notificationsSent: number;
@@ -454,9 +419,8 @@ export async function sendPersonalizedNotifications(): Promise<{
   let notificationsSent = 0;
 
   try {
-    if (!FCM_SERVER_KEY) return { usersProcessed: 0, notificationsSent: 0 };
+    if (!isConfigured()) return { usersProcessed: 0, notificationsSent: 0 };
 
-    // Get users who want personalized notifications and have device tokens
     const users = await prisma.user.findMany({
       where: {
         notificationEnabled: true,
@@ -467,21 +431,18 @@ export async function sendPersonalizedNotifications(): Promise<{
         id: true,
         preferredCategories: true,
       },
-      take: 100, // Process max 100 users at a time
+      take: 100,
     });
 
     for (const user of users) {
       usersProcessed++;
-
-      // Check daily limit
       if (!canSendNotification(user.id, 'personalized')) continue;
 
-      // Get top trending articles in user's preferred categories
       const categoryArticles = await prisma.article.findMany({
         where: {
           category: { in: user.preferredCategories },
-          trendingScore: { gt: 30 }, // Only high-scoring articles
-          publishedAt: { gte: new Date(Date.now() - 6 * 60 * 60 * 1000) }, // Last 6 hours
+          trendingScore: { gt: 30 },
+          publishedAt: { gte: new Date(Date.now() - 6 * 60 * 60 * 1000) },
           expiresAt: { gte: new Date() },
         },
         orderBy: { trendingScore: 'desc' },
@@ -492,7 +453,6 @@ export async function sendPersonalizedNotifications(): Promise<{
 
       const article = categoryArticles[0];
 
-      // Skip if already notified this user about this article
       const alreadyNotified = await prisma.notificationLog.findFirst({
         where: {
           userId: user.id,
@@ -502,7 +462,6 @@ export async function sendPersonalizedNotifications(): Promise<{
       });
       if (alreadyNotified) continue;
 
-      // Send notification
       const categoryLabels: Record<string, string> = {
         politics: 'سياسة', economy: 'اقتصاد', sports: 'رياضة',
         technology: 'تكنولوجيا', entertainment: 'ترفيه', health: 'صحة',
@@ -527,10 +486,10 @@ export async function sendPersonalizedNotifications(): Promise<{
     }
 
     console.log(
-      `[FCM] Personalized: ${usersProcessed} users processed, ${notificationsSent} sent`
+      `[WebPush] Personalized: ${usersProcessed} users processed, ${notificationsSent} sent`
     );
   } catch (error: any) {
-    console.error('[FCM] Personalized notifications error:', error.message);
+    console.error('[WebPush] Personalized notifications error:', error.message);
   }
 
   return { usersProcessed, notificationsSent };
@@ -538,23 +497,17 @@ export async function sendPersonalizedNotifications(): Promise<{
 
 // ============ 3. DAILY DIGEST ============
 
-/**
- * Send a daily digest notification with top 5 trending articles.
- * Only sends if user hasn't received one in the last 20 hours.
- */
 export async function sendDailyDigest(userId?: string): Promise<{
   sent: number;
 }> {
   let sent = 0;
 
   try {
-    if (!FCM_SERVER_KEY) return { sent: 0 };
+    if (!isConfigured()) return { sent: 0 };
 
-    // Get top 5 trending articles
     const topArticles = await getTrendingArticles(5);
     if (topArticles.length === 0) return { sent: 0 };
 
-    // Build digest body
     const digestBody = topArticles
       .slice(0, 5)
       .map((a, i) => `${i + 1}. ${a.title}`)
@@ -564,7 +517,7 @@ export async function sendDailyDigest(userId?: string): Promise<{
       title: '📋 ملخص أخبار اليوم',
       body: digestBody.substring(0, 200) + (digestBody.length > 200 ? '...' : ''),
       icon: '/favicon-news.png',
-      url: '/', // Link to home page
+      url: '/',
       data: {
         type: 'digest',
         articleCount: String(topArticles.length),
@@ -572,11 +525,9 @@ export async function sendDailyDigest(userId?: string): Promise<{
     };
 
     if (userId) {
-      // Send to specific user
       const result = await sendToUser(userId, payload, 'digest');
       if (result.success) sent++;
     } else {
-      // Send to all users who want digest
       const users = await prisma.user.findMany({
         where: {
           notificationEnabled: true,
@@ -587,7 +538,6 @@ export async function sendDailyDigest(userId?: string): Promise<{
       });
 
       for (const user of users) {
-        // Check cooldown: skip if digest sent in last 20 hours
         const digest = await prisma.dailyDigest.findUnique({
           where: { userId: user.id },
         });
@@ -601,7 +551,6 @@ export async function sendDailyDigest(userId?: string): Promise<{
         const result = await sendToUser(user.id, payload, 'digest');
         if (result.success) {
           sent++;
-          // Update digest tracking
           await prisma.dailyDigest.upsert({
             where: { userId: user.id },
             update: {
@@ -618,72 +567,70 @@ export async function sendDailyDigest(userId?: string): Promise<{
       }
     }
 
-    console.log(`[FCM] Daily digest: ${sent} sent`);
+    console.log(`[WebPush] Daily digest: ${sent} sent`);
   } catch (error: any) {
-    console.error('[FCM] Daily digest error:', error.message);
+    console.error('[WebPush] Daily digest error:', error.message);
   }
 
   return { sent };
 }
 
-// ============ DEVICE TOKEN MANAGEMENT ============
+// ============ DEVICE SUBSCRIPTION MANAGEMENT ============
 
 /**
- * Register a new device token for push notifications.
+ * Register a new Web Push subscription for a user.
+ * Accepts the full PushSubscription object from the browser's pushManager.subscribe().
  */
 export async function registerDeviceToken(
   userId: string,
-  token: string,
+  subscription: WebPushSubscription,
   platform: string = 'web',
   userAgent?: string
 ): Promise<{ success: boolean; error?: string }> {
   try {
+    // Use endpoint as the unique identifier
     await prisma.deviceToken.upsert({
-      where: { token },
+      where: { endpoint: subscription.endpoint },
       update: {
         userId,
+        keys_p256dh: subscription.keys.p256dh,
+        keys_auth: subscription.keys.auth,
         platform,
         userAgent,
         isActive: true,
       },
       create: {
         userId,
-        token,
+        endpoint: subscription.endpoint,
+        keys_p256dh: subscription.keys.p256dh,
+        keys_auth: subscription.keys.auth,
         platform,
         userAgent,
       },
     });
 
-    console.log(`[FCM] Device registered: ${token.substring(0, 12)}... for user ${userId}`);
+    console.log(`[WebPush] Subscription registered: ${subscription.endpoint.substring(0, 50)}... for user ${userId}`);
     return { success: true };
   } catch (error: any) {
-    console.error('[FCM] Device registration error:', error.message);
+    console.error('[WebPush] Subscription registration error:', error.message);
     return { success: false, error: error.message };
   }
 }
 
 /**
- * Unregister a device token.
+ * Unregister a Web Push subscription.
  */
 export async function unregisterDeviceToken(
-  token: string
+  endpoint: string
 ): Promise<{ success: boolean }> {
   try {
-    await prisma.deviceToken.deleteMany({ where: { token } });
+    await prisma.deviceToken.deleteMany({ where: { endpoint } });
     return { success: true };
   } catch {
     return { success: false };
   }
 }
 
-// ============ INITIALIZATION CHECK ============
+// ============ EXPORTS FOR CLIENT USE ============
 
-if (!FCM_SERVER_KEY) {
-  console.warn(
-    '[FCM] FCM_SERVER_KEY not set. Push notifications are disabled.' +
-    '\n     To enable: Add FCM_SERVER_KEY to your .env file.' +
-    '\n     Get it from: Firebase Console > Project Settings > Cloud Messaging'
-  );
-} else {
-  console.log(`[FCM] ✅ Configured with key (${FCM_SERVER_KEY.substring(0, 8)}...)`);
-}
+export { isConfigured };

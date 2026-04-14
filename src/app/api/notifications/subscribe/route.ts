@@ -1,32 +1,55 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { registerDeviceToken, unregisterDeviceToken } from '@/lib/notifications';
 
-// ============ SUBSCRIBE: Register device for push notifications ============
+// ============ SUBSCRIBE: Register Web Push subscription ============
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { userId, token, platform, userAgent } = body;
+    const { userId, subscription, platform } = body;
 
-    if (!userId || !token) {
+    // Support both old FCM format (token) and new Web Push format (subscription)
+    if (body.token && !body.subscription) {
+      // Legacy FCM token - return friendly error
       return NextResponse.json(
-        { error: 'userId and token are required' },
+        { error: 'FCM format is deprecated. Please use Web Push subscription format.' },
+        { status: 400 }
+      );
+    }
+
+    if (!userId || !subscription) {
+      return NextResponse.json(
+        { error: 'userId and subscription are required. subscription = { endpoint, keys: { p256dh, auth } }' },
+        { status: 400 }
+      );
+    }
+
+    // Validate subscription format
+    if (!subscription.endpoint || !subscription.keys?.p256dh || !subscription.keys?.auth) {
+      return NextResponse.json(
+        { error: 'Invalid subscription format. Must include endpoint and keys (p256dh, auth).' },
         { status: 400 }
       );
     }
 
     const result = await registerDeviceToken(
       userId,
-      token,
+      {
+        endpoint: subscription.endpoint,
+        keys: {
+          p256dh: subscription.keys.p256dh,
+          auth: subscription.keys.auth,
+        },
+      },
       platform || 'web',
-      userAgent || request.headers.get('user-agent') || undefined
+      request.headers.get('user-agent') || undefined
     );
 
     if (result.success) {
-      return NextResponse.json({ success: true, message: 'Device registered for notifications' });
+      return NextResponse.json({ success: true, message: 'Subscription registered for push notifications' });
     }
 
     return NextResponse.json(
-      { error: result.error || 'Failed to register device' },
+      { error: result.error || 'Failed to register subscription' },
       { status: 500 }
     );
   } catch (error: any) {
@@ -35,21 +58,24 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// ============ UNSUBSCRIBE: Remove device token ============
+// ============ UNSUBSCRIBE: Remove Web Push subscription ============
 export async function DELETE(request: NextRequest) {
   try {
     const body = await request.json();
-    const { token } = body;
+    const { endpoint, token } = body;
 
-    if (!token) {
-      return NextResponse.json({ error: 'token is required' }, { status: 400 });
+    // Support both old and new format
+    const targetEndpoint = endpoint || token;
+
+    if (!targetEndpoint) {
+      return NextResponse.json({ error: 'endpoint is required' }, { status: 400 });
     }
 
-    const result = await unregisterDeviceToken(token);
+    const result = await unregisterDeviceToken(targetEndpoint);
 
     return NextResponse.json({
       success: result.success,
-      message: result.success ? 'Device unregistered' : 'Failed to unregister',
+      message: result.success ? 'Subscription unregistered' : 'Failed to unregister',
     });
   } catch (error: any) {
     console.error('[Notifications] Unsubscribe error:', error);

@@ -163,16 +163,23 @@ model Article {
 
 // ============ NOTIFICATION SYSTEM ============
 
-// User device tokens for push notifications
+// User device subscriptions for Web Push notifications (VAPID)
 model DeviceToken {
   id        String   @id @default(cuid())
   userId    String
-  token     String   @unique  // FCM device token
+  
+  // Web Push subscription fields (from pushManager.subscribe)
+  endpoint  String   // Push service endpoint URL
+  keys_p256dh String // Client's public key (base64url)
+  keys_auth    String // Client's auth secret (base64url)
+  
+  // Legacy FCM token (kept for backward compat, will be removed)
+  token     String?  @unique  // Old FCM device token (deprecated)
+  
   platform  String   @default("web")  // web, ios, android
   userAgent String?
   isActive  Boolean  @default(true)
   
-  userId String
   user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
   
   createdAt DateTime @default(now())
@@ -180,6 +187,7 @@ model DeviceToken {
   
   @@index([userId])
   @@index([isActive])
+  @@index([endpoint])
 }
 
 // Notification log (sent notifications history)

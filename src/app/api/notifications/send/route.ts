@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { sendToUser, broadcastNotification, checkAndSendBreakingNews, sendPersonalizedNotifications } from '@/lib/notifications';
 
-// ============ SEND: Trigger notifications manually ============
-// Supports: breaking, personalized, broadcast
+// ============ SEND: Trigger Web Push notifications ============
+// Supports: check-breaking, personalized, send, broadcast
+// Uses Web Push (VAPID) instead of FCM
 
 export async function POST(request: NextRequest) {
   try {
