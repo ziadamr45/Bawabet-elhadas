@@ -13,7 +13,7 @@ import { useNews } from '@/hooks/useNews';
 import { useTrending } from '@/hooks/useTrending';
 import { useSearch } from '@/hooks/useSearch';
 import { useForYou } from '@/hooks/useForYou';
-import { CategoryId, NewsArticle, COUNTRIES, CountryCode } from '@/lib/utils';
+import { CategoryId, NewsArticle, CATEGORIES, COUNTRIES, CountryCode } from '@/lib/utils';
 import { RefreshCw, AlertTriangle, ChevronDown, Sparkles } from 'lucide-react';
 
 export default function Home() {
