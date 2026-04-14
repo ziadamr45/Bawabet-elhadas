@@ -21,6 +21,7 @@ export default function Home() {
   const [country, setCountry] = useState<CountryCode>('eg');
   const [searchOpen, setSearchOpen] = useState(false);
   const [selectedArticle, setSelectedArticle] = useState<NewsArticle | null>(null);
+  const [detailAction, setDetailAction] = useState<'summarize' | 'verify' | null>(null);
   const [visibleCount, setVisibleCount] = useState(9);
 
   const { articles, loading, error, refetch } = useNews(activeCategory, country);
@@ -36,10 +37,12 @@ export default function Home() {
 
   const handleSummarize = useCallback((article: NewsArticle) => {
     setSelectedArticle(article);
+    setDetailAction('summarize');
   }, []);
 
   const handleVerify = useCallback((article: NewsArticle) => {
     setSelectedArticle(article);
+    setDetailAction('verify');
   }, []);
 
   const handleArticleClick = useCallback((article: NewsArticle) => {
@@ -237,7 +240,8 @@ export default function Home() {
       {/* News Detail Modal */}
       <NewsDetail
         article={selectedArticle}
-        onClose={() => setSelectedArticle(null)}
+        onClose={() => { setSelectedArticle(null); setDetailAction(null); }}
+        initialAction={detailAction}
       />
     </div>
   );
