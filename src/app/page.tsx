@@ -12,18 +12,21 @@ import LoadingSkeleton, { CategorySkeleton } from '@/components/LoadingSkeleton'
 import { useNews } from '@/hooks/useNews';
 import { useTrending } from '@/hooks/useTrending';
 import { useSearch } from '@/hooks/useSearch';
-import { CategoryId, NewsArticle, CATEGORIES } from '@/lib/utils';
-import { RefreshCw, AlertTriangle, ChevronDown } from 'lucide-react';
+import { useForYou } from '@/hooks/useForYou';
+import { CategoryId, NewsArticle, COUNTRIES, CountryCode } from '@/lib/utils';
+import { RefreshCw, AlertTriangle, ChevronDown, Sparkles } from 'lucide-react';
 
 export default function Home() {
   const [activeCategory, setActiveCategory] = useState<CategoryId>('home');
+  const [country, setCountry] = useState<CountryCode>('eg');
   const [searchOpen, setSearchOpen] = useState(false);
   const [selectedArticle, setSelectedArticle] = useState<NewsArticle | null>(null);
   const [visibleCount, setVisibleCount] = useState(9);
 
-  const { articles, loading, error, refetch } = useNews(activeCategory);
+  const { articles, loading, error, refetch } = useNews(activeCategory, country);
   const { articles: trendingArticles, loading: trendingLoading } = useTrending();
   const { articles: searchArticles, loading: searchLoading, search, clear: clearSearch } = useSearch();
+  const { articles: forYouArticles, loading: forYouLoading, trackClick } = useForYou(country);
 
   const handleCategoryChange = useCallback((category: CategoryId) => {
     setActiveCategory(category);
@@ -35,6 +38,14 @@ export default function Home() {
     setSelectedArticle(article);
   }, []);
 
+  const handleVerify = useCallback((article: NewsArticle) => {
+    setSelectedArticle(article);
+  }, []);
+
+  const handleArticleClick = useCallback((article: NewsArticle) => {
+    trackClick(article.category, article.source);
+  }, [trackClick]);
+
   const handleSearch = useCallback(async (query: string) => {
     await search(query);
   }, [search]);
@@ -43,7 +54,11 @@ export default function Home() {
     setVisibleCount((prev) => prev + 6);
   };
 
-  const currentCategoryLabel = CATEGORIES.find((c) => c.id === activeCategory)?.label || 'الرئيسية';
+  // Get the right articles based on active category
+  const displayArticles = activeCategory === 'foryou' ? forYouArticles : articles;
+  const displayLoading = activeCategory === 'foryou' ? forYouLoading : loading;
+  const categoryLabel = activeCategory === 'foryou' ? 'لك' : 
+    CATEGORIES.find((c) => c.id === activeCategory)?.label || 'الرئيسية';
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-[#202124]">
@@ -52,6 +67,8 @@ export default function Home() {
         activeCategory={activeCategory}
         onCategoryChange={handleCategoryChange}
         onSearchOpen={() => setSearchOpen(true)}
+        country={country}
+        onCountryChange={setCountry}
       />
 
       {/* Trending Bar */}
@@ -65,28 +82,31 @@ export default function Home() {
             {/* Category Title */}
             <div className="flex items-center justify-between mb-6">
               <div>
-                <h2 className="text-2xl font-bold text-gray-900 dark:text-white">
-                  {currentCategoryLabel}
+                <h2 className="text-2xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
+                  {activeCategory === 'foryou' && <Sparkles className="w-6 h-6 text-violet-500" />}
+                  {categoryLabel}
                 </h2>
                 <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-                  آخر الأخبار والمستجدات
+                  {activeCategory === 'foryou' 
+                    ? 'أخبار مخصصة بناءً على اهتماماتك' 
+                    : 'آخر الأخبار والمستجدات'}
                 </p>
               </div>
               <button
                 onClick={refetch}
-                disabled={loading}
+                disabled={displayLoading}
                 className="flex items-center gap-2 px-3 py-1.5 bg-white dark:bg-[#303134] border border-gray-200 dark:border-gray-600 rounded-lg text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors disabled:opacity-50"
               >
-                <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+                <RefreshCw className={`w-4 h-4 ${displayLoading ? 'animate-spin' : ''}`} />
                 تحديث
               </button>
             </div>
 
             {/* Loading State */}
-            {loading && <LoadingSkeleton />}
+            {displayLoading && <LoadingSkeleton />}
 
             {/* Error State */}
-            {error && !loading && (
+            {error && !displayLoading && (
               <div className="text-center py-12">
                 <AlertTriangle className="w-12 h-12 text-yellow-500 mx-auto mb-4" />
                 <h3 className="text-lg font-bold text-gray-900 dark:text-white mb-2">حدث خطأ</h3>
@@ -101,30 +121,38 @@ export default function Home() {
             )}
 
             {/* Content */}
-            {!loading && !error && articles.length > 0 && (
+            {!displayLoading && !error && displayArticles.length > 0 && (
               <>
-                {/* Hero Article (first article) */}
+                {/* Hero Article (first article) - only on home */}
                 {activeCategory === 'home' && (
                   <div className="mb-8">
-                    <NewsCard article={articles[0]} onSummarize={handleSummarize} featured />
+                    <NewsCard 
+                      article={displayArticles[0]} 
+                      onSummarize={handleSummarize} 
+                      onVerify={handleVerify}
+                      onArticleClick={handleArticleClick}
+                      featured 
+                    />
                   </div>
                 )}
 
                 {/* News Grid */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6">
-                  {(activeCategory === 'home' ? articles.slice(1) : articles)
+                  {(activeCategory === 'home' ? displayArticles.slice(1) : displayArticles)
                     .slice(0, visibleCount)
                     .map((article) => (
                       <NewsCard
                         key={article.id}
                         article={article}
                         onSummarize={handleSummarize}
+                        onVerify={handleVerify}
+                        onArticleClick={handleArticleClick}
                       />
                     ))}
                 </div>
 
                 {/* Load More */}
-                {articles.length > visibleCount && (
+                {displayArticles.length > visibleCount && (
                   <div className="text-center mt-8">
                     <button
                       onClick={loadMore}
@@ -139,7 +167,7 @@ export default function Home() {
             )}
 
             {/* Empty State */}
-            {!loading && !error && articles.length === 0 && (
+            {!displayLoading && !error && displayArticles.length === 0 && (
               <div className="text-center py-12">
                 <div className="text-5xl mb-4">📰</div>
                 <h3 className="text-lg font-bold text-gray-900 dark:text-white mb-2">لا توجد أخبار حالياً</h3>
@@ -148,14 +176,17 @@ export default function Home() {
             )}
 
             {/* Category Sections on Home */}
-            {activeCategory === 'home' && !loading && articles.length > 0 && (
+            {activeCategory === 'home' && !displayLoading && displayArticles.length > 0 && (
               <div className="mt-12 space-y-10">
-                {CATEGORIES.filter((c) => c.id !== 'home' && c.id !== 'trending').slice(0, 4).map((cat) => (
+                {CATEGORIES.filter((c) => c.id !== 'home' && c.id !== 'trending' && c.id !== 'foryou').slice(0, 4).map((cat) => (
                   <CategorySection
                     key={cat.id}
                     categoryId={cat.id}
                     label={cat.label}
+                    country={country}
                     onSummarize={handleSummarize}
+                    onVerify={handleVerify}
+                    onArticleClick={handleArticleClick}
                     onViewAll={() => handleCategoryChange(cat.id)}
                   />
                 ))}
@@ -200,15 +231,21 @@ export default function Home() {
 function CategorySection({
   categoryId,
   label,
+  country,
   onSummarize,
+  onVerify,
+  onArticleClick,
   onViewAll,
 }: {
   categoryId: string;
   label: string;
+  country: string;
   onSummarize: (article: NewsArticle) => void;
+  onVerify: (article: NewsArticle) => void;
+  onArticleClick: (article: NewsArticle) => void;
   onViewAll: () => void;
 }) {
-  const { articles, loading } = useNews(categoryId as CategoryId);
+  const { articles, loading } = useNews(categoryId as CategoryId, country);
 
   if (loading) return <CategorySkeleton />;
   if (articles.length === 0) return null;
@@ -226,7 +263,13 @@ function CategorySection({
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
         {articles.slice(0, 3).map((article) => (
-          <NewsCard key={article.id} article={article} onSummarize={onSummarize} />
+          <NewsCard 
+            key={article.id} 
+            article={article} 
+            onSummarize={onSummarize}
+            onVerify={onVerify}
+            onArticleClick={onArticleClick}
+          />
         ))}
       </div>
     </section>

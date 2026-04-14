@@ -10,17 +10,17 @@ interface UseNewsReturn {
   refetch: () => void;
 }
 
-const cache = new Map<string, { data: NewsArticle[]; timestamp: number }>();
+const clientCache = new Map<string, { data: NewsArticle[]; timestamp: number }>();
 const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
 
-export function useNews(category: CategoryId): UseNewsReturn {
+export function useNews(category: CategoryId, country: string = 'eg'): UseNewsReturn {
   const [articles, setArticles] = useState<NewsArticle[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const fetchNews = useCallback(async () => {
-    // Check cache first
-    const cached = cache.get(category);
+    const cacheKey = `${category}-${country}`;
+    const cached = clientCache.get(cacheKey);
     if (cached && Date.now() - cached.timestamp < CACHE_DURATION) {
       setArticles(cached.data);
       setLoading(false);
@@ -31,21 +31,22 @@ export function useNews(category: CategoryId): UseNewsReturn {
     setError(null);
 
     try {
-      const response = await fetch(`/api/news?category=${category}`);
+      const response = await fetch(`/api/news?category=${category}&country=${country}`);
       const data = await response.json();
 
       if (data.error) {
         setError(data.error);
       } else {
-        setArticles(data.articles || []);
-        cache.set(category, { data: data.articles || [], timestamp: Date.now() });
+        const articles = data.articles || [];
+        setArticles(articles);
+        clientCache.set(cacheKey, { data: articles, timestamp: Date.now() });
       }
     } catch {
       setError('فشل في جلب الأخبار');
     } finally {
       setLoading(false);
     }
-  }, [category]);
+  }, [category, country]);
 
   useEffect(() => {
     fetchNews();

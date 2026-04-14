@@ -1,6 +1,6 @@
 'use client';
 
-import { Newspaper, TrendingUp, Globe, Cpu, Heart, DollarSign, Trophy, Palette, GraduationCap, FlaskConical } from 'lucide-react';
+import { Newspaper, TrendingUp, Globe, Cpu, Heart, DollarSign, Trophy, Palette, GraduationCap, FlaskConical, Sparkles } from 'lucide-react';
 import { CategoryId, CATEGORIES } from '@/lib/utils';
 
 interface SidebarProps {
@@ -21,6 +21,7 @@ const categoryIcons: Record<string, React.ReactNode> = {
   world: <Globe className="w-4 h-4" />,
   culture: <Palette className="w-4 h-4" />,
   education: <GraduationCap className="w-4 h-4" />,
+  foryou: <Sparkles className="w-4 h-4" />,
 };
 
 export default function Sidebar({ activeCategory, onCategoryChange }: SidebarProps) {
@@ -52,10 +53,14 @@ export default function Sidebar({ activeCategory, onCategoryChange }: SidebarPro
 
         {/* About */}
         <div className="bg-white dark:bg-[#303134] rounded-xl border border-gray-100 dark:border-gray-700 p-4">
-          <h3 className="text-sm font-bold text-gray-500 dark:text-gray-400 mb-2">عن أخبار اليوم</h3>
+          <h3 className="text-sm font-bold text-gray-500 dark:text-gray-400 mb-2">عن بوابة الحدث</h3>
           <p className="text-xs text-gray-500 dark:text-gray-400 leading-relaxed">
             منصة أخبار عربية شاملة تجمع الأخبار من مصادر متعددة ومتنوعة باستخدام تقنيات الذكاء الاصطناعي والبحث المتقدم لتوفير تجربة إخبارية متكاملة.
           </p>
+          <div className="mt-3 flex items-center gap-2 text-xs text-gray-400">
+            <Sparkles className="w-3 h-3" />
+            <span>3 مصادر أخبار + ذكاء اصطناعي</span>
+          </div>
         </div>
       </div>
     </aside>
