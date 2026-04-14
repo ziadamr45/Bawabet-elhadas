@@ -1,44 +1,41 @@
 // ============================================================
 // بوابة الحدث - Hugging Face AI System
-// Free, stable, production-ready inference via HF API
-// Replaces Ollama/Gemini with Hugging Face Inference API
+// Free, stable, production-ready inference via HF Router API
+// Uses Qwen3.5-9B (excellent Arabic support) via together provider
 // ============================================================
 
-import { v4 as uuidv4 } from 'uuid';
-
 // ============ CONFIGURATION ============
-const HF_API_URL = 'https://api-inference.huggingface.co/models';
 const HF_TOKEN = process.env.HUGGINGFACE_API_KEY || process.env.HF_TOKEN || '';
 
-// Model pool — ordered by priority (multilingual first for Arabic support)
-const SUMMARIZATION_MODELS = [
-  'csebuetnlp/mT5_multilingual_XLSum',  // Best for Arabic summarization
-  'google/flan-t5-large',                // Multilingual instruction-following
-  'facebook/bart-large-cnn',             // English fallback (fast)
-] as const;
+// HF Router endpoint (new, replaces deprecated api-inference)
+const HF_CHAT_URL = 'https://router.huggingface.co/together/v1/chat/completions';
 
-const TEXT_GENERATION_MODEL = 'google/flan-t5-large';  // For scoring & quality tasks
+// Model for all AI tasks (summarization, verification, scoring)
+const AI_MODEL = 'Qwen/Qwen3.5-9B';
 
 // ============ TIMEOUTS & RATE LIMITS ============
-const API_TIMEOUT_MS = 30_000;         // 30s per request
+const API_TIMEOUT_MS = 60_000;         // 60s (thinking model needs more time)
 const MAX_RETRIES = 1;                 // 1 retry on failure
-const RETRY_DELAY_MS = 1_000;          // 1s between retries
-const RATE_LIMIT_DELAY_MS = 1_500;     // 1.5s between HF calls (free tier)
-const MAX_CONCURRENT_REQUESTS = 3;     // Max parallel HF calls
+const RETRY_DELAY_MS = 2_000;          // 2s between retries
+const RATE_LIMIT_DELAY_MS = 2_000;     // 2s between calls (free tier)
+const MAX_CONCURRENT_REQUESTS = 2;     // Max parallel calls
 
 // ============ RESPONSE TYPES ============
-interface HFSummarizationResponse {
-  summary_text: string;
-}
-
-interface HFTextGenerationResponse {
-  generated_text: string;
-}
-
-interface HFErrorResponse {
-  error: string;
-  estimated_time?: number;
-  model?: string;
+interface HFChatResponse {
+  id: string;
+  choices: Array<{
+    message: {
+      role: string;
+      content: string;
+      reasoning?: string;
+    };
+    finish_reason: string;
+  }>;
+  usage: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  };
 }
 
 // ============ IN-MEMORY CACHE ============
@@ -47,12 +44,12 @@ const qualityCache = new Map<string, { data: { quality: number; analysis: string
 const rankCache = new Map<string, { data: number[]; timestamp: number }>();
 const CACHE_TTL = 30 * 60 * 1000; // 30 minutes
 
-// Rate limiter — simple queue to avoid free-tier throttling
+// Rate limiter
 let lastCallTime = 0;
 let activeRequests = 0;
 
 /**
- * Generate a cache key from text (deterministic hash)
+ * Generate a cache key from text
  */
 function cacheKey(text: string): string {
   let hash = 0;
@@ -65,14 +62,12 @@ function cacheKey(text: string): string {
 }
 
 /**
- * Enforce rate limit: wait if needed, track concurrency
+ * Enforce rate limit
  */
 async function enforceRateLimit(): Promise<void> {
-  // Wait for slot
   while (activeRequests >= MAX_CONCURRENT_REQUESTS) {
     await new Promise((r) => setTimeout(r, 500));
   }
-  // Enforce minimum delay between calls
   const now = Date.now();
   const timeSinceLastCall = now - lastCallTime;
   if (timeSinceLastCall < RATE_LIMIT_DELAY_MS) {
@@ -89,38 +84,74 @@ function releaseRequest(): void {
 // ============ CORE HF API CALLER ============
 
 /**
- * Low-level Hugging Face API caller with retry, timeout, and rate limiting
+ * Call Hugging Face Router API (together provider, Qwen3.5-9B)
+ * Supports chat completions with Arabic content
  */
 async function callHuggingFace(
-  model: string,
-  body: Record<string, unknown>,
-  timeoutMs: number = API_TIMEOUT_MS
-): Promise<Response> {
+  systemPrompt: string,
+  userMessage: string,
+  maxTokens: number = 2048,
+  temperature: number = 0.3
+): Promise<string> {
   if (!HF_TOKEN) {
-    throw new Error('HUGGINGFACE_API_KEY not set. Add it to your .env file.');
+    throw new Error('HUGGINGFACE_API_KEY not set');
   }
 
   await enforceRateLimit();
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const timeout = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
 
   try {
-    const response = await fetch(`${HF_API_URL}/${model}`, {
+    const response = await fetch(HF_CHAT_URL, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${HF_TOKEN}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify({
+        model: AI_MODEL,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userMessage },
+        ],
+        max_tokens: maxTokens,
+        temperature,
+      }),
       signal: controller.signal,
     });
-    return response;
-  } catch (fetchError: any) {
-    if (fetchError.name === 'AbortError') {
-      throw new Error(`Hugging Face request timed out after ${timeoutMs / 1000}s`);
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+
+      if (response.status === 429) {
+        throw new Error('Rate limited — backing off');
+      }
+      if (response.status === 401 || response.status === 403) {
+        throw new Error(`Authentication failed (${response.status}). Check your HUGGINGFACE_API_KEY.`);
+      }
+
+      throw new Error(`HF API error (${response.status}): ${errorData.error || 'Unknown'}`);
     }
-    throw new Error(`Hugging Face connection failed: ${fetchError.message}`);
+
+    const data: HFChatResponse = await response.json();
+    const content = data.choices?.[0]?.message?.content || '';
+
+    if (!content.trim()) {
+      throw new Error('Empty response from AI model');
+    }
+
+    console.log(
+      `[HF] Response OK: ${content.length} chars, ` +
+      `${data.usage?.total_tokens || '?'} tokens`
+    );
+
+    return content.trim();
+  } catch (error: any) {
+    if (error.name === 'AbortError') {
+      throw new Error(`HF request timed out after ${API_TIMEOUT_MS / 1000}s`);
+    }
+    throw error;
   } finally {
     clearTimeout(timeout);
     releaseRequest();
@@ -128,71 +159,43 @@ async function callHuggingFace(
 }
 
 /**
- * Call HF API with retry logic
+ * Call with retry logic
  */
-async function callWithRetry<T>(
-  model: string,
-  body: Record<string, unknown>,
-  parser: (data: any) => T,
-  timeoutMs: number = API_TIMEOUT_MS
-): Promise<T> {
+async function callWithRetry(
+  systemPrompt: string,
+  userMessage: string,
+  maxTokens: number = 2048,
+  temperature: number = 0.3
+): Promise<string> {
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     if (attempt > 0) {
-      console.log(`[HF] Retry attempt ${attempt}/${MAX_RETRIES} for ${model}`);
+      console.log(`[HF] Retry ${attempt}/${MAX_RETRIES}`);
       await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
     }
 
     try {
-      const response = await callHuggingFace(model, body, timeoutMs);
-
-      if (!response.ok) {
-        const errorData: HFErrorResponse = await response.json().catch(() => ({ error: 'Unknown error' }));
-
-        // Model is loading — wait and retry
-        if (response.status === 503 && errorData.estimated_time) {
-          const waitTime = Math.min(errorData.estimated_time * 1000, 20_000);
-          console.log(`[HF] Model "${model}" is loading. Waiting ${Math.ceil(waitTime / 1000)}s...`);
-          await new Promise((r) => setTimeout(r, waitTime));
-          continue;
-        }
-
-        // Rate limited (429)
-        if (response.status === 429) {
-          console.log(`[HF] Rate limited on ${model}. Waiting 5s...`);
-          await new Promise((r) => setTimeout(r, 5_000));
-          continue;
-        }
-
-        // Auth error
-        if (response.status === 401 || response.status === 403) {
-          throw new Error(`Hugging Face authentication failed (${response.status}). Check your HF_TOKEN.`);
-        }
-
-        throw new Error(`Hugging Face error (${response.status}): ${errorData.error}`);
-      }
-
-      const data = await response.json();
-      return parser(data);
-
+      return await callHuggingFace(systemPrompt, userMessage, maxTokens, temperature);
     } catch (error: any) {
       lastError = error;
-      console.error(`[HF] Attempt ${attempt + 1} failed for ${model}:`, error.message);
+      console.error(`[HF] Attempt ${attempt + 1} failed:`, error.message);
+
+      // Don't retry auth errors
+      if (error.message?.includes('401') || error.message?.includes('403')) {
+        break;
+      }
     }
   }
 
-  throw lastError || new Error('All Hugging Face API attempts failed');
+  throw lastError || new Error('All AI attempts failed');
 }
 
 // ============ AVAILABILITY CHECK ============
 
 let hfStatus: { available: boolean; checkedAt: number } | null = null;
-const STATUS_CHECK_INTERVAL = 5 * 60 * 1000; // Re-check every 5 minutes
+const STATUS_CHECK_INTERVAL = 5 * 60 * 1000;
 
-/**
- * Check if Hugging Face API is accessible and token is valid
- */
 export async function isHuggingFaceAvailable(): Promise<boolean> {
   if (hfStatus && Date.now() - hfStatus.checkedAt < STATUS_CHECK_INTERVAL) {
     return hfStatus.available;
@@ -205,22 +208,23 @@ export async function isHuggingFaceAvailable(): Promise<boolean> {
 
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
-    const response = await fetch('https://api-inference.huggingface.co/models/google/flan-t5-large', {
+    const timeout = setTimeout(() => controller.abort(), 10_000);
+    const response = await fetch(HF_CHAT_URL, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${HF_TOKEN}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ inputs: 'test' }),
+      body: JSON.stringify({
+        model: AI_MODEL,
+        messages: [{ role: 'user', content: 'مرحبا' }],
+        max_tokens: 10,
+      }),
       signal: controller.signal,
     });
     clearTimeout(timeout);
 
-    hfStatus = {
-      available: response.status !== 401 && response.status !== 403,
-      checkedAt: Date.now(),
-    };
+    hfStatus = { available: response.status !== 401 && response.status !== 403, checkedAt: Date.now() };
     return hfStatus.available;
   } catch {
     hfStatus = { available: false, checkedAt: Date.now() };
@@ -228,28 +232,22 @@ export async function isHuggingFaceAvailable(): Promise<boolean> {
   }
 }
 
-/**
- * Backward-compatible check (same interface as old ollama.ts)
- */
 export function isGeminiConfigured(): boolean {
   return !!HF_TOKEN;
 }
 
 // ============================================================
-// PUBLIC API — Same interface as ollama.ts for drop-in replacement
+// 1. SUMMARIZATION (AI-Powered)
 // ============================================================
 
-// ============ 1. GENERATE SUMMARY ============
-
 /**
- * Generate a summary of an Arabic news article (2-3 lines)
- * Uses Hugging Face multilingual summarization model
- * Falls back to simple text extraction on failure
+ * Generate an Arabic summary of a news article (2-3 sentences).
+ * Uses Qwen3.5-9B via Hugging Face for high-quality Arabic output.
  */
 export async function summarizeArticle(title: string, snippet: string): Promise<string> {
   const articleText = [title, snippet].filter(Boolean).join('\n\n');
 
-  // Check cache first
+  // Check cache
   const key = cacheKey(articleText);
   const cached = summaryCache.get(key);
   if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
@@ -258,14 +256,28 @@ export async function summarizeArticle(title: string, snippet: string): Promise<
   }
 
   if (!HF_TOKEN) {
-    console.warn('[HF] No token configured, using fallback summary');
     return fallbackSummary(title, snippet);
   }
 
   try {
-    const summary = await generateSummary(title, snippet);
-    summaryCache.set(key, { data: summary, timestamp: Date.now() });
-    return summary;
+    const summary = await callWithRetry(
+      'أنت مساعد متخصص في تلخيص الأخبار باللغة العربية. قواعدك:\n- لخّص الخبر في 2-3 جمل مختصرة وواضحة فقط\n- لا تضف عناوين أو مقدمات أو خاتمة\n- ابدأ الملخص مباشرة بدون أي كلمات استهلالية\n- حافظ على الحقائق والأرقام المذكورة في الخبر\n- استخدم لغة عربية فصحى بسيطة',
+      `لخّص الخبر التالي:\n\n${articleText}`,
+      2048,
+      0.3
+    );
+
+    // Clean up: remove any thinking markers if leaked
+    const cleaned = summary
+      .replace(/<think[^>]*>[\s\S]*?<\/think>/gi, '')
+      .replace(/Thinking Process:([\s\S]*?)(?=\n\n|\n[A-Zأ-ي])/gi, '')
+      .replace(/^\s*(摘要|Summary|ملخص)[:\s]*/i, '')
+      .trim();
+
+    const finalSummary = cleaned.length > 0 ? cleaned : summary;
+
+    summaryCache.set(key, { data: finalSummary, timestamp: Date.now() });
+    return finalSummary;
   } catch (error: any) {
     console.error('[HF] Summarization failed:', error.message);
     return fallbackSummary(title, snippet);
@@ -273,84 +285,18 @@ export async function summarizeArticle(title: string, snippet: string): Promise<
 }
 
 /**
- * Core summarization function using Hugging Face Inference API
- * Tries multilingual models first, falls back to English model
+ * Core summarization function (for direct use)
  */
 export async function generateSummary(title: string, snippet: string): Promise<string> {
-  const articleText = [title, snippet].filter(Boolean).join(' — ');
-
-  // Build the prompt for Arabic summarization
-  const prompt = `Summarize the following Arabic news article in 2-3 concise sentences in Arabic. Do not add titles or introductions, just the summary:\n\n${articleText}`;
-
-  let lastError: Error | null = null;
-
-  // Try each model in priority order
-  for (const model of SUMMARIZATION_MODELS) {
-    try {
-      // For mT5_XLSum and flan-t5, use text2text-generation endpoint
-      const isXLSum = model.includes('XLSum');
-
-      if (isXLSum) {
-        // mT5 XLSum expects raw text input, not a prompt
-        const result = await callWithRetry<HFSummarizationResponse>(
-          model,
-          { inputs: articleText.substring(0, 1024) },  // XLSum has token limits
-          (data) => {
-            // XLSum returns array or single object
-            if (Array.isArray(data) && data[0]?.summary_text) {
-              return data[0];
-            }
-            if (data?.summary_text) return data;
-            throw new Error('Unexpected response format from XLSum model');
-          },
-          25_000
-        );
-        return result.summary_text.trim();
-      } else {
-        // flan-t5-large and bart-large-cnn use text2text-generation
-        const body: Record<string, unknown> = {
-          inputs: prompt,
-          parameters: {
-            max_new_tokens: 150,
-            temperature: 0.3,
-            top_p: 0.9,
-            do_sample: false,
-          },
-        };
-
-        const result = await callWithRetry<HFTextGenerationResponse>(
-          model,
-          body,
-          (data) => {
-            if (Array.isArray(data) && data[0]?.generated_text) {
-              return data[0];
-            }
-            if (data?.generated_text) return data;
-            throw new Error('Unexpected response format');
-          },
-          25_000
-        );
-        return result.generated_text.trim();
-      }
-    } catch (error: any) {
-      console.warn(`[HF] Model "${model}" failed:`, error.message);
-      lastError = error;
-      continue; // Try next model
-    }
-  }
-
-  // All models failed
-  throw lastError || new Error('All summarization models failed');
+  return summarizeArticle(title, snippet);
 }
 
 /**
- * Fallback summary when Hugging Face is unavailable
- * Extracts first 100-150 characters from the article text
+ * Fallback summary when AI is unavailable
  */
 export function fallbackSummary(title: string, snippet: string): string {
   if (!snippet && !title) return 'لا يوجد ملخص متاح';
 
-  // Prefer snippet (it's usually the article description)
   if (snippet) {
     const cleaned = snippet.replace(/\s+/g, ' ').trim();
     if (cleaned.length <= 150) return cleaned;
@@ -359,15 +305,16 @@ export function fallbackSummary(title: string, snippet: string): string {
     return truncated.substring(0, lastSpace > 0 ? lastSpace : 150) + '...';
   }
 
-  // Fall back to title only
   return title || 'لا يوجد ملخص متاح';
 }
 
-// ============ 2. VERIFY ARTICLE (QUALITY & RELIABILITY) ============
+// ============================================================
+// 2. ARTICLE VERIFICATION (AI-Powered)
+// ============================================================
 
 /**
- * Verify news reliability — returns quality score (1-10) and analysis
- * Uses heuristic scoring + optional HF classification
+ * Verify news reliability using AI analysis.
+ * Returns quality score (1-10) and detailed analysis.
  */
 export async function verifyArticle(
   title: string,
@@ -376,118 +323,207 @@ export async function verifyArticle(
   const articleText = [title, snippet].filter(Boolean).join('\n\n');
 
   // Check cache
-  const key = cacheKey(articleText);
+  const key = cacheKey(articleText + ':verify');
   const cached = qualityCache.get(key);
   if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
     console.log('[HF] Quality cache HIT');
     return cached.data;
   }
 
-  // Use heuristic scoring (fast, no API call needed)
-  const result = detectQuality(title, snippet);
+  // Use AI if available
+  if (HF_TOKEN) {
+    try {
+      const response = await callWithRetry(
+        'أنت محلل أخبار متخصص في تقييم موثوقية الأخبار العربية. حلل الخبر التالي وأجب بالصيغة التالية فقط بدون أي نص إضافي:\n\nالدرجة: [رقم من 1 إلى 10]\nالتحليل: [جملة واحدة توضح سبب الدرجة]\n\nقواعد التقييم:\n- 9-10: خبر من مصدر رسمي موثوق مع تفاصيل محددة وأرقام\n- 7-8: خبر جيد من مصدر معروف لكن ينقصه بعض التفاصيل\n- 5-6: خبر عادي لا يوجد ما يؤكده أو ينفيه\n- 3-4: خبر مشبوه يحتوي عبارات استقطابية أو مبالغة\n- 1-2: خبر مزيف أو مضلل بوضوح\n\nلا تضف أي شيء آخر غير الدرجة والتحليل.',
+        `حلل هذا الخبر:\n\n${articleText}`,
+        2048,
+        0.2
+      );
 
-  // Cache the result
+      // Parse response
+      const result = parseVerificationResponse(response);
+
+      qualityCache.set(key, { data: result, timestamp: Date.now() });
+      return result;
+    } catch (error: any) {
+      console.error('[HF] AI verification failed:', error.message);
+    }
+  }
+
+  // Fallback to heuristic
+  const result = detectQuality(title, snippet);
   qualityCache.set(key, { data: result, timestamp: Date.now() });
   return result;
 }
 
 /**
- * Detect article quality using heuristic analysis
- * Fast, reliable, no external API needed
- * 
- * Scoring criteria:
- * - Text length and completeness
- * - Presence of specific details (numbers, names, locations)
- * - Source credibility signals
- * - Clickbait indicators (negative signals)
+ * Parse AI verification response into structured data
+ */
+function parseVerificationResponse(response: string): { quality: number; analysis: string } {
+  // Try to extract "الدرجة: X" pattern
+  const scoreMatch = response.match(/الدرجة\s*[:：]\s*(\d+(?:\.\d+)?)/);
+  // Try "Analysis:" or "التحليل:" pattern
+  const analysisMatch = response.match(/التحليل\s*[:：]\s*(.+)/);
+
+  if (scoreMatch) {
+    const quality = Math.min(10, Math.max(1, parseFloat(scoreMatch[1]) || 5));
+    const analysis = analysisMatch
+      ? analysisMatch[1].trim().substring(0, 150)
+      : response.replace(/الدرجة\s*[:：]\s*\d+(?:\.\d+)?/g, '').trim().substring(0, 150);
+
+    return {
+      quality: Math.round(quality * 10) / 10,
+      analysis: analysis || 'تحليل غير متاح',
+    };
+  }
+
+  // Try just extracting a number
+  const numMatch = response.match(/(\d{1,2})(?:\.(\d+))?/);
+  if (numMatch) {
+    const quality = Math.min(10, Math.max(1, parseInt(numMatch[1]) || 5));
+    const analysis = response.replace(/\d+/g, '').trim().substring(0, 150) || 'تحليل غير متاح';
+    return { quality, analysis };
+  }
+
+  return { quality: 5, analysis: 'لم يتم تحليل الخبر بشكل صحيح' };
+}
+
+// ============================================================
+// 3. QUALITY DETECTION (Heuristic Fallback)
+// ============================================================
+
+/**
+ * Detect article quality using heuristic analysis.
+ * Enhanced with more signals and wider score range.
  */
 export function detectQuality(title: string, snippet: string): { quality: number; analysis: string } {
   const fullText = [title, snippet].filter(Boolean).join(' ');
-  
+
   let score = 5; // Start neutral
   const signals: string[] = [];
 
-  // --- POSITIVE SIGNALS ---
+  // ===== POSITIVE SIGNALS =====
 
-  // Text length (longer = more informative)
-  if (fullText.length > 300) {
-    score += 1;
+  // Text length
+  if (fullText.length > 400) {
+    score += 1.5;
     signals.push('نص مفصل');
+  } else if (fullText.length > 200) {
+    score += 0.5;
+    signals.push('نص متوسط');
   } else if (fullText.length < 80) {
-    score -= 1;
+    score -= 1.5;
     signals.push('نص قصير جداً');
   }
 
-  // Contains numbers/years (factual reporting)
-  if (/\d{4}/.test(fullText) || /\d+%/.test(fullText)) {
+  // Numbers/years/dates
+  const numberCount = (fullText.match(/\d+/g) || []).length;
+  if (numberCount >= 5) {
+    score += 1.5;
+    signals.push('أرقام وإحصائيات كثيرة');
+  } else if (numberCount >= 2) {
     score += 1;
     signals.push('يحتوي أرقام وتواريخ');
   }
 
-  // Contains quotation marks (direct quotes)
-  if (/[""«»"'].*[""«»"']/.test(fullText)) {
+  // Quotation marks (direct quotes)
+  const quoteCount = (fullText.match(/[""«»"']/g) || []).length;
+  if (quoteCount >= 4) {
+    score += 1.5;
+    signals.push('اقتباسات متعددة');
+  } else if (quoteCount >= 2) {
+    score += 0.5;
+    signals.push('اقتباسات');
+  }
+
+  // Location names (specific reporting)
+  const locations = (fullText.match(/\b(مصر|السعودية|الإمارات|القاهرة|رياض|دبي|واشنطن|لندن|باريس|بغداد|بيروت|طرابلس|الخرطوم|دمشق|عمان|الدوحة|المنامة|الكويت|الرباط|الجزائر|تونس|نيويورك|طوكيو|موسكو|برلين)\b/gi) || []).length;
+  if (locations >= 2) {
     score += 1;
-    signals.push('يحتلي اقتباسات');
-  }
-
-  // Contains location/country names (specific reporting)
-  const locationPatterns = /\b(مصر|السعودية|الإمارات|القاهرة|رياض|دبي|واشنطن|لندن|باريس|بغداد|بيروت)\b/i;
-  if (locationPatterns.test(fullText)) {
+    signals.push('مواقع جغرافية متعددة');
+  } else if (locations >= 1) {
     score += 0.5;
-    signals.push('يحتوي مواقع جغرافية');
+    signals.push('يحتوي موقع جغرافي');
   }
 
-  // Contains named entities (official titles)
-  const officialPatterns = /\b(رئيس|وزير|سفير|محافظ|حكومة|برلمان|جامعة|وزارة)\b/i;
-  if (officialPatterns.test(fullText)) {
+  // Official titles/entities
+  const officials = (fullText.match(/\b(رئيس|وزير|سفير|محافظ|حكومة|برلمان|جامعة|وزارة|مجلس|قيادي|مسؤول|الرئاسة|مجلس الوزراء)\b/gi) || []).length;
+  if (officials >= 2) {
+    score += 1;
+    signals.push('جهات رسمية متعددة');
+  } else if (officials >= 1) {
     score += 0.5;
-    signals.push('يحتلي جهات رسمية');
+    signals.push('جهة رسمية');
   }
 
-  // --- NEGATIVE SIGNALS ---
-
-  // Clickbait indicators (Arabic)
-  const clickbaitPatterns = /\b(صادم|لن تصدق|بعد شبه|سر|الحقيقة الكاملة|عاجل جداً|ممنوع النشر|لأول مرة|شاهد|قبل الحذف)\b/i;
-  if (clickbaitPatterns.test(fullText)) {
-    score -= 2;
-    signals.push('يحتوي عبارات استقطابية');
+  // Source mention (named source)
+  if (/أفاد|قال|أوضح|أكد|صرح|أعلن|بيان|مصدر|وفقاً|حسب/i.test(fullText)) {
+    score += 1;
+    signals.push('ينسب لمصدر محدد');
   }
 
-  // Excessive punctuation (!!! ???)
-  if (/[!؟]{3,}/.test(fullText)) {
-    score -= 1;
+  // ===== NEGATIVE SIGNALS =====
+
+  // Clickbait
+  const clickbaitWords = ['صادم', 'لن تصدق', 'بعد شبه', 'سر', 'الحقيقة الكاملة', 'عاجل جداً', 'ممنوع النشر', 'لأول مرة', 'شاهد الفيديو', 'قبل الحذف', 'سيجعلك تبكي', 'ما حد يتوقعه'];
+  const clickbaitCount = clickbaitWords.filter(w => fullText.includes(w)).length;
+  if (clickbaitCount >= 2) {
+    score -= 3;
+    signals.push('عبارات استقطابية متعددة');
+  } else if (clickbaitCount >= 1) {
+    score -= 1.5;
+    signals.push('عبارات استقطابية');
+  }
+
+  // Excessive punctuation
+  const exclamations = (fullText.match(/[!؟]{2,}/g) || []).length;
+  if (exclamations >= 3) {
+    score -= 1.5;
     signals.push('علامات تعجب مفرطة');
+  } else if (exclamations >= 1) {
+    score -= 0.5;
   }
 
-  // ALL CAPS (in Arabic, less common but still a signal)
+  // ALL CAPS
   if (/[A-Z]{5,}/.test(fullText)) {
     score -= 0.5;
     signals.push('حروف كبيرة');
   }
 
-  // Too many emoji-like characters
+  // Too many emojis
   const emojiCount = (fullText.match(/[❗❓🔥💥⚡🎉😡😭🚨🆘]/g) || []).length;
   if (emojiCount > 2) {
     score -= 1;
     signals.push('رموز تعبيرية مفرطة');
   }
 
-  // Clamp score to 1-10 range
-  score = Math.round(Math.min(10, Math.max(1, score)) * 10) / 10;
-
-  // Generate analysis text
-  let analysis: string;
-  if (score >= 8) {
-    analysis = `خبر موثوق - ${signals.join('، ')}`;
-  } else if (score >= 6) {
-    analysis = `خبر معقول - ${signals.join('، ')}`;
-  } else if (score >= 4) {
-    analysis = `خبر يحتاج تحقق - ${signals.join('، ')}`;
-  } else {
-    analysis = `خبر مشبوه - ${signals.join('، ')}`;
+  // Source credibility bonus
+  const credibleSources = ['رويترز', 'ألمانيا', 'فرانس برس', 'سي إن إن', 'BBC', 'الأهرام', 'الجزيرة', 'المصري اليوم', 'الوفد', 'اليوم السابع'];
+  for (const src of credibleSources) {
+    if (fullText.includes(src)) {
+      score += 1;
+      signals.push(`مصدر موثوق (${src})`);
+      break;
+    }
   }
 
-  // If no signals detected, provide default analysis
+  // Clamp and round
+  score = Math.round(Math.min(10, Math.max(1, score)) * 10) / 10;
+
+  // Generate analysis
+  let analysis: string;
+  if (score >= 8.5) {
+    analysis = `خبر موثوق جداً — ${signals.join('، ')}`;
+  } else if (score >= 7) {
+    analysis = `خبر موثوق — ${signals.join('، ')}`;
+  } else if (score >= 5.5) {
+    analysis = `خبر معقول — ${signals.join('، ')}`;
+  } else if (score >= 4) {
+    analysis = `خبر يحتاج تحقق — ${signals.join('، ')}`;
+  } else {
+    analysis = `خبر مشبوه — ${signals.join('، ')}`;
+  }
+
   if (signals.length === 0) {
     analysis = 'لا توجد مؤشرات كافية لتقييم الخبر';
   }
@@ -495,35 +531,30 @@ export function detectQuality(title: string, snippet: string): { quality: number
   return { quality: score, analysis };
 }
 
-// ============ 3. SCORE ARTICLE IMPORTANCE ============
+// ============================================================
+// 4. IMPORTANCE SCORING (Heuristic)
+// ============================================================
 
-/**
- * Score article importance (1-10) using heuristic analysis
- * No AI needed — fast, reliable, free
- */
 export function scoreArticle(title: string, snippet: string): number {
   const fullText = [title, snippet].filter(Boolean).join(' ');
   let score = 5;
 
-  // High-impact keywords (Arabic)
   const highImpactWords = [
     'حرب', 'صراع', 'كرئيس', 'انتخابات', 'انفجار', 'زلزال', 'كارثة',
     'اتفاقية', 'قمة', 'رسمي', 'قرار', 'إعلان', 'تغيير', 'استقالة',
     'وفاة', 'إصابة', 'تصعيد', 'هدنة', 'حصار', 'غزو', 'تحرير',
     'رئيس جمهورية', 'رئيس وزراء', 'ملك', 'أمير', 'بابا',
     'أمم متحدة', 'حلف شمال الأطلسي', 'ناتو', 'أوبك', 'فلسطين',
-    'إسرائيل', 'أمريكا', 'روسيا', 'الصين', 'أوروبا',
+    'إسرائيل', 'أمريكا', 'روسيا', 'الصين', 'أوروبا', 'تركيا', 'إيران',
   ];
 
-  // Medium-impact keywords
   const mediumImpactWords = [
     'اقتصاد', 'بورصة', 'أسعار', 'نفط', 'غاز', 'تضخم', 'بطالة',
-    'رياضة', 'كأس العالم', 'أولمبياد', 'بطولة', 'نهائي',
+    'رياضة', 'كأس العالم', 'أولمبياد', 'بطولة', 'نهائي', 'دوري',
     'تكنولوجيا', 'ذكاء اصطناعي', 'إنترنت', 'فضاء', 'اكتشاف',
-    'صحة', 'وباء', 'لقاح', 'مستشفى', 'دواء',
+    'صحة', 'وباء', 'لقاح', 'مستشفى', 'دواء', 'عملية جراحية',
   ];
 
-  // Count keyword matches
   let highMatches = 0;
   let mediumMatches = 0;
 
@@ -534,55 +565,39 @@ export function scoreArticle(title: string, snippet: string): number {
     if (fullText.includes(word)) mediumMatches++;
   }
 
-  // Score calculation
-  score += Math.min(highMatches * 1.5, 4);  // Max +4 from high-impact words
-  score += Math.min(mediumMatches * 0.75, 2); // Max +2 from medium-impact words
+  score += Math.min(highMatches * 1.5, 4);
+  score += Math.min(mediumMatches * 0.75, 2);
 
-  // Title vs snippet: if title has high-impact words, boost more
   const titleHighMatches = highImpactWords.filter(w => title.includes(w)).length;
   if (titleHighMatches > 0) score += 0.5;
-
-  // Short breaking-style titles get a small boost
   if (title.length < 60 && highMatches > 0) score += 0.5;
-
-  // Article length bonus (longer articles tend to be more important)
   if (fullText.length > 500) score += 0.5;
 
   return Math.round(Math.min(10, Math.max(1, score)) * 10) / 10;
 }
 
-// ============ 4. RANK ARTICLES (BATCH SCORING) ============
+// ============================================================
+// 5. RANK ARTICLES (Batch)
+// ============================================================
 
-/**
- * Rank multiple articles by importance (batch scoring)
- * Uses heuristic scoring — no API calls needed
- * Drop-in replacement for old Ollama-based ranking
- */
 export async function rankArticles(titles: string[]): Promise<number[]> {
   if (titles.length === 0) return [];
 
-  // Check cache
   const key = cacheKey(titles.join('|'));
   const cached = rankCache.get(key);
   if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    console.log('[HF] Rank cache HIT');
     return cached.data;
   }
 
-  // Score each article using heuristic (instant, no API call)
-  const scores = titles.map((title) => scoreArticle(title, ''));
-
-  // Cache the result
+  const scores = titles.map((t) => scoreArticle(t, ''));
   rankCache.set(key, { data: scores, timestamp: Date.now() });
-
   return scores;
 }
 
-// ============ CACHE MANAGEMENT ============
+// ============================================================
+// CACHE MANAGEMENT
+// ============================================================
 
-/**
- * Clear all caches (useful for testing or admin)
- */
 export function clearAllCaches(): void {
   summaryCache.clear();
   qualityCache.clear();
@@ -591,46 +606,31 @@ export function clearAllCaches(): void {
   console.log('[HF] All caches cleared');
 }
 
-/**
- * Get cache statistics (useful for monitoring)
- */
 export function getCacheStats(): {
   summaryCacheSize: number;
   qualityCacheSize: number;
   rankCacheSize: number;
   isConfigured: boolean;
-  estimatedTimeToExpire: string;
 } {
-  const now = Date.now();
-  const minExpiry = Math.min(
-    ...[...summaryCache.values(), ...qualityCache.values(), ...rankCache.values()].map(
-      (v) => Math.max(0, CACHE_TTL - (now - v.timestamp))
-    ),
-    CACHE_TTL
-  );
-
   return {
     summaryCacheSize: summaryCache.size,
     qualityCacheSize: qualityCache.size,
     rankCacheSize: rankCache.size,
     isConfigured: !!HF_TOKEN,
-    estimatedTimeToExpire: `${Math.ceil(minExpiry / 60000)} دقيقة`,
   };
 }
 
-// ============ INITIALIZATION CHECK ============
-
-// Log configuration status on module load
+// ============ INIT ============
 if (!HF_TOKEN) {
   console.warn(
-    '[HF] ⚠️  HUGGINGFACE_API_KEY not set in environment variables.' +
-    '\n     AI features will use fallback (no-cost heuristic) mode.' +
-    '\n     Get a free token at: https://huggingface.co/settings/tokens' +
-    '\n     Then add to .env: HUGGINGFACE_API_KEY=hf_xxxxxxxxxxxxx'
+    '[HF] ⚠️  HUGGINGFACE_API_KEY not set.' +
+    '\n     AI features will use heuristic fallback mode.' +
+    '\n     Get a free token: https://huggingface.co/settings/tokens'
   );
 } else {
   console.log(
-    `[HF] ✅ Configured with token (${HF_TOKEN.substring(0, 8)}...)` +
-    `\n[HF] Summarization models: ${SUMMARIZATION_MODELS.join(', ')}`
+    `[HF] ✅ Configured (${HF_TOKEN.substring(0, 8)}...)` +
+    `\n[HF] Model: ${AI_MODEL} (together provider)` +
+    `\n[HF] Endpoint: ${HF_CHAT_URL}`
   );
 }
