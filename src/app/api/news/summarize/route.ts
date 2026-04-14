@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getZAI } from '@/lib/zai';
 
 // ============ ROBUST AI ENDPOINT ============
 // This endpoint handles AI summarization, verification, and importance ranking.
@@ -14,16 +15,14 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'لا يوجد نص للمعالجة' }, { status: 400 });
     }
 
-    // ============ DYNAMIC IMPORT WITH ERROR HANDLING ============
+    // ============ GET ZAI INSTANCE ============
     let zai: any;
     try {
-      const ZAIModule = await import('z-ai-web-dev-sdk');
-      const ZAI = ZAIModule.default || ZAIModule;
-      zai = await ZAI.create();
-    } catch (importError: any) {
-      console.error('Z-AI SDK import/init error:', importError.message);
+      zai = await getZAI();
+    } catch (initError: any) {
+      console.error('Z-AI SDK init error:', initError.message);
       return NextResponse.json(
-        { error: 'خدمة الذكاء الاصطناعي غير متاحة حالياً', details: importError.message },
+        { error: 'خدمة الذكاء الاصطناعي غير متاحة حالياً', details: initError.message },
         { status: 503 }
       );
     }
