@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { CATEGORIES, deduplicateArticles, getCached, setCache, NewsArticle } from '@/lib/utils';
 import { prisma } from '@/lib/prisma';
-import { isGeminiConfigured, rankArticles } from '@/lib/gemini';
+import { isOllamaAvailable, rankArticles } from '@/lib/ollama';
 
 // ============ API KEYS ============
 const GNEWS_API_KEY = process.env.GNEWS_API_KEY || 'b72cdb0d6660d4c8f9e1473f412eba10';
@@ -130,16 +130,19 @@ export async function GET(request: NextRequest) {
 
     // ============ AI ENHANCEMENT (optional, for importance scoring) ============
     let enhanced = paginated;
-    if (aiEnhance && paginated.length > 0 && isGeminiConfigured()) {
+    if (aiEnhance && paginated.length > 0) {
       try {
-        const topArticles = paginated.slice(0, 5);
-        const titles = topArticles.map((a) => a.title);
-        const scores = await rankArticles(titles);
-        
-        enhanced = paginated.map((article, i) => ({
-          ...article,
-          importanceScore: i < scores.length ? scores[i] : undefined,
-        }));
+        const available = await isOllamaAvailable();
+        if (available) {
+          const topArticles = paginated.slice(0, 5);
+          const titles = topArticles.map((a) => a.title);
+          const scores = await rankArticles(titles);
+          
+          enhanced = paginated.map((article, i) => ({
+            ...article,
+            importanceScore: i < scores.length ? scores[i] : undefined,
+          }));
+        }
       } catch {
         // AI enhancement failed, return without scores
       }

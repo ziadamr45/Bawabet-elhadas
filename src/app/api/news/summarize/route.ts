@@ -1,20 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { summarizeArticle, verifyArticle, rankArticles, isGeminiConfigured } from '@/lib/gemini';
+import { summarizeArticle, verifyArticle, rankArticles, isOllamaAvailable } from '@/lib/ollama';
 
-// ============ AI ENDPOINT (Gemini-Powered) ============
+// ============ AI ENDPOINT (Ollama-Powered) ============
 // Handles AI summarization, verification, and importance ranking
-// using Google Gemini API (works on Vercel)
+// Uses LOCAL Ollama runtime - no API keys, no quotas, works offline
 
 export async function POST(request: NextRequest) {
   try {
-    // Check if Gemini is configured
-    if (!isGeminiConfigured()) {
-      return NextResponse.json(
-        { error: 'خدمة الذكاء الاصطناعي غير مُكوَّنة. يرجى إضافة GEMINI_API_KEY' },
-        { status: 503 }
-      );
-    }
-
     const body = await request.json();
     const { title, snippet, action } = body;
 
