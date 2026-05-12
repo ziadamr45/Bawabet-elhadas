@@ -10,12 +10,12 @@ const AI_API_KEY = process.env.OPENROUTER_API_KEY || '';
 // OpenRouter endpoint (OpenAI-compatible chat completions)
 const AI_CHAT_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
-// Primary model (configurable via env var, defaults to deepseek-chat)
-// deepseek-chat: fast, cheap, excellent Arabic support
-const AI_MODEL = process.env.OPENROUTER_MODEL || 'deepseek/deepseek-chat';
+// Primary model: Gemini 2.0 Flash (fast, excellent Arabic support)
+const AI_MODEL = process.env.OPENROUTER_MODEL || 'google/gemini-2.0-flash-001';
 
 // Fallback models if primary is unavailable (e.g. region-blocked)
 const FALLBACK_MODELS = [
+  'deepseek/deepseek-chat',
   'deepseek/deepseek-chat-v3-0324',
   'qwen/qwen3-14b',
   'google/gemma-4-31b-it',
@@ -647,7 +647,216 @@ export function scoreArticle(title: string, snippet: string): number {
 }
 
 // ============================================================
-// 5. RANK ARTICLES (Batch)
+// 5. TRANSLATION (AI-Powered)
+// ============================================================
+
+/**
+ * Translate non-Arabic text to Arabic using AI.
+ */
+export async function translateToArabic(text: string, sourceLang: string = 'en'): Promise<string> {
+  if (!text || !text.trim()) return text;
+
+  // Check if text is already Arabic
+  const arabicRatio = (text.match(/[\u0600-\u06FF]/g) || []).length / text.length;
+  if (arabicRatio > 0.3) return text; // Already mostly Arabic
+
+  const key = cacheKey('translate:' + text);
+  const cached = summaryCache.get(key);
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+    return cached.data;
+  }
+
+  if (!AI_API_KEY) return text;
+
+  try {
+    const translated = await callWithRetry(
+      'أنت مترجم محترف. ترجم النص التالي إلى اللغة العربية فقط. أعد الصياغة بشكل طبيعي واحترافي. لا تضف أي تعليقات أو مقدمات.',
+      text,
+      2048,
+      0.3
+    );
+
+    const cleaned = translated
+      .replace(/<think[^>]*>[\s\S]*?<\/think>/gi, '')
+      .trim();
+
+    const result = cleaned || text;
+    summaryCache.set(key, { data: result, timestamp: Date.now() });
+    return result;
+  } catch (error: any) {
+    console.error('[AI] Translation failed:', error.message);
+    return text;
+  }
+}
+
+// ============================================================
+// 6. NEWS GROUPING (AI-Powered)
+// ============================================================
+
+/**
+ * Group similar articles from different sources into one story.
+ * Uses AI to detect if articles cover the same event.
+ */
+export async function groupSimilarArticles(
+  articles: Array<{ title: string; url: string; source: string }>
+): Promise<GroupResult[]> {
+  if (articles.length <= 1) {
+    return articles.map(a => ({ mainTitle: a.title, articles: [{ source: a.source, url: a.url }] }));
+  }
+
+  // Heuristic grouping first (fast, no API call)
+  const heuristicGroups = heuristicGroupArticles(articles);
+
+  // If we have AI, try to refine groups
+  if (!AI_API_KEY || articles.length < 3) {
+    return heuristicGroups;
+  }
+
+  try {
+    // Take top 10 articles max for AI grouping (cost control)
+    const topArticles = articles.slice(0, 10);
+    const titlesList = topArticles.map((a, i) => `${i + 1}. [${a.source}] ${a.title}`).join('\n');
+
+    const aiResponse = await callWithRetry(
+      'أنت محرر أخبار محترف. عندك قائمة عناوين أخبار من مصادر مختلفة. حدد الأخبار اللي بتتكلم عن نفس الحدث وأعطني أرقامها معاً.\n\nأجب بالصيغة دي فقط:\nمجموعة 1: أرقام العناوين (مفصولة بفواصل)\nمجموعة 2: أرقام العناوين (مفصولة بفواصل)\n...\n\nلو خبر مافيش زيه، سيبه لوحده. كل عنوان لازم يكون في مجموعة واحدة بس.',
+      `العناوين:\n${titlesList}`,
+      1024,
+      0.2
+    );
+
+    return parseGroupingResponse(aiResponse, topArticles, heuristicGroups);
+  } catch (error: any) {
+    console.error('[AI] Grouping failed:', error.message);
+    return heuristicGroups;
+  }
+}
+
+/**
+ * Heuristic grouping: group articles by similar titles (no API call)
+ */
+type GroupResult = { mainTitle: string; articles: Array<{ source: string; url: string }> };
+
+function heuristicGroupArticles(
+  articles: Array<{ title: string; url: string; source: string }>
+): GroupResult[] {
+  const groups: Array<{ mainTitle: string; articles: Array<{ source: string; url: string }>; key: string }> = [];
+  const used = new Set<number>();
+
+  for (let i = 0; i < articles.length; i++) {
+    if (used.has(i)) continue;
+
+    const group = {
+      mainTitle: articles[i].title,
+      articles: [{ source: articles[i].source, url: articles[i].url }],
+      key: normalizeForComparison(articles[i].title),
+    };
+
+    for (let j = i + 1; j < articles.length; j++) {
+      if (used.has(j)) continue;
+      const similarity = titleSimilarity(articles[i].title, articles[j].title);
+      if (similarity > 0.4) {
+        group.articles.push({ source: articles[j].source, url: articles[j].url });
+        used.add(j);
+      }
+    }
+
+    groups.push(group);
+    used.add(i);
+  }
+
+  return groups.map(({ mainTitle, articles }) => ({ mainTitle, articles }));
+}
+
+/**
+ * Calculate title similarity (0-1) using word overlap
+ */
+function titleSimilarity(a: string, b: string): number {
+  const wordsA = new Set(normalizeForComparison(a).split(/\s+/).filter(w => w.length > 2));
+  const wordsB = new Set(normalizeForComparison(b).split(/\s+/).filter(w => w.length > 2));
+
+  if (wordsA.size === 0 || wordsB.size === 0) return 0;
+
+  let intersection = 0;
+  for (const w of wordsA) {
+    if (wordsB.has(w)) intersection++;
+  }
+
+  return intersection / Math.min(wordsA.size, wordsB.size);
+}
+
+/**
+ * Normalize Arabic text for comparison
+ */
+function normalizeForComparison(text: string): string {
+  return text
+    .replace(/[إأآا]/g, 'ا')
+    .replace(/[ةه]/g, 'ه')
+    .replace(/ى/g, 'ي')
+    .replace(/[\u064B-\u065F]/g, '') // Remove tashkeel
+    .replace(/[^\u0600-\u06FFa-zA-Z0-9\s]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * Parse AI grouping response
+ */
+function parseGroupingResponse(
+  response: string,
+  articles: Array<{ title: string; url: string; source: string }>,
+  fallback: GroupResult[]
+): GroupResult[] {
+  try {
+    const groups: Array<{ mainTitle: string; articles: Array<{ source: string; url: string }> }> = [];
+    const usedIndices = new Set<number>();
+
+    // Parse "مجموعة N: 1, 3, 5" patterns
+    const groupMatches = Array.from(response.matchAll(/مجموعة\s*\d+\s*[:：]\s*([\d,\s]+)/g));
+
+    for (const match of groupMatches) {
+      const indices = match[1]
+        .split(/[,\s]+/)
+        .map(n => parseInt(n.trim()) - 1)
+        .filter(n => n >= 0 && n < articles.length);
+
+      if (indices.length === 0) continue;
+
+      const groupArticles = indices
+        .filter(i => !usedIndices.has(i))
+        .map(i => {
+          usedIndices.add(i);
+          return { source: articles[i].source, url: articles[i].url };
+        });
+
+      if (groupArticles.length > 0) {
+        // Use the first article's title as main title
+        const mainIdx = indices[0];
+        groups.push({
+          mainTitle: articles[mainIdx].title,
+          articles: groupArticles,
+        });
+      }
+    }
+
+    // Add ungrouped articles
+    for (let i = 0; i < articles.length; i++) {
+      if (!usedIndices.has(i)) {
+        groups.push({
+          mainTitle: articles[i].title,
+          articles: [{ source: articles[i].source, url: articles[i].url }],
+        });
+      }
+    }
+
+    return groups.length > 0 ? groups : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+// ============================================================
+// 7. RANK ARTICLES (Batch)
 // ============================================================
 
 export async function rankArticles(titles: string[]): Promise<number[]> {
