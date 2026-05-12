@@ -1,33 +1,36 @@
 // ============================================================
-// بوابة الحدث - Hugging Face AI System
-// Free, stable, production-ready inference via HF Router API
-// Uses Qwen3.5-9B (excellent Arabic support) via together provider
+// بوابة الحدث - AI System (OpenRouter + Gemini 2.0 Flash)
+// Production-ready AI inference via OpenRouter API
+// Uses google/gemini-2.0-flash-001 (fast, excellent Arabic support)
 // ============================================================
 
 // ============ CONFIGURATION ============
-const HF_TOKEN = process.env.HUGGINGFACE_API_KEY || process.env.HF_TOKEN || '';
+const AI_API_KEY = process.env.OPENROUTER_API_KEY || '';
 
-// HF Router endpoint (new, replaces deprecated api-inference)
-const HF_CHAT_URL = 'https://router.huggingface.co/together/v1/chat/completions';
+// OpenRouter endpoint (OpenAI-compatible chat completions)
+const AI_CHAT_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
 // Model for all AI tasks (summarization, verification, scoring)
-const AI_MODEL = 'Qwen/Qwen3.5-9B';
+const AI_MODEL = 'google/gemini-2.0-flash-001';
+
+// App info for OpenRouter headers
+const APP_URL = process.env.NEXTAUTH_URL || 'http://localhost:3000';
+const APP_NAME = 'بوابة الحدث - Bawabet Elhadas';
 
 // ============ TIMEOUTS & RATE LIMITS ============
-const API_TIMEOUT_MS = 60_000;         // 60s (thinking model needs more time)
+const API_TIMEOUT_MS = 30_000;         // 30s (Gemini Flash is fast)
 const MAX_RETRIES = 1;                 // 1 retry on failure
 const RETRY_DELAY_MS = 2_000;          // 2s between retries
-const RATE_LIMIT_DELAY_MS = 2_000;     // 2s between calls (free tier)
-const MAX_CONCURRENT_REQUESTS = 2;     // Max parallel calls
+const RATE_LIMIT_DELAY_MS = 500;       // 500ms between calls (paid tier, faster)
+const MAX_CONCURRENT_REQUESTS = 3;     // Max parallel calls (OpenRouter handles more)
 
 // ============ RESPONSE TYPES ============
-interface HFChatResponse {
+interface AIChatResponse {
   id: string;
   choices: Array<{
     message: {
       role: string;
       content: string;
-      reasoning?: string;
     };
     finish_reason: string;
   }>;
@@ -81,20 +84,20 @@ function releaseRequest(): void {
   activeRequests = Math.max(0, activeRequests - 1);
 }
 
-// ============ CORE HF API CALLER ============
+// ============ CORE AI API CALLER ============
 
 /**
- * Call Hugging Face Router API (together provider, Qwen3.5-9B)
+ * Call OpenRouter API (google/gemini-2.0-flash-001)
  * Supports chat completions with Arabic content
  */
-async function callHuggingFace(
+async function callAI(
   systemPrompt: string,
   userMessage: string,
   maxTokens: number = 2048,
   temperature: number = 0.3
 ): Promise<string> {
-  if (!HF_TOKEN) {
-    throw new Error('HUGGINGFACE_API_KEY not set');
+  if (!AI_API_KEY) {
+    throw new Error('OPENROUTER_API_KEY not set');
   }
 
   await enforceRateLimit();
@@ -103,11 +106,13 @@ async function callHuggingFace(
   const timeout = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
 
   try {
-    const response = await fetch(HF_CHAT_URL, {
+    const response = await fetch(AI_CHAT_URL, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${HF_TOKEN}`,
+        'Authorization': `Bearer ${AI_API_KEY}`,
         'Content-Type': 'application/json',
+        'HTTP-Referer': APP_URL,
+        'X-Title': APP_NAME,
       },
       body: JSON.stringify({
         model: AI_MODEL,
@@ -128,13 +133,16 @@ async function callHuggingFace(
         throw new Error('Rate limited — backing off');
       }
       if (response.status === 401 || response.status === 403) {
-        throw new Error(`Authentication failed (${response.status}). Check your HUGGINGFACE_API_KEY.`);
+        throw new Error(`Authentication failed (${response.status}). Check your OPENROUTER_API_KEY.`);
+      }
+      if (response.status === 402) {
+        throw new Error('Insufficient credits on OpenRouter account.');
       }
 
-      throw new Error(`HF API error (${response.status}): ${errorData.error || 'Unknown'}`);
+      throw new Error(`OpenRouter API error (${response.status}): ${errorData.error || 'Unknown'}`);
     }
 
-    const data: HFChatResponse = await response.json();
+    const data: AIChatResponse = await response.json();
     const content = data.choices?.[0]?.message?.content || '';
 
     if (!content.trim()) {
@@ -142,14 +150,14 @@ async function callHuggingFace(
     }
 
     console.log(
-      `[HF] Response OK: ${content.length} chars, ` +
+      `[AI] Response OK: ${content.length} chars, ` +
       `${data.usage?.total_tokens || '?'} tokens`
     );
 
     return content.trim();
   } catch (error: any) {
     if (error.name === 'AbortError') {
-      throw new Error(`HF request timed out after ${API_TIMEOUT_MS / 1000}s`);
+      throw new Error(`AI request timed out after ${API_TIMEOUT_MS / 1000}s`);
     }
     throw error;
   } finally {
@@ -171,18 +179,18 @@ async function callWithRetry(
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     if (attempt > 0) {
-      console.log(`[HF] Retry ${attempt}/${MAX_RETRIES}`);
+      console.log(`[AI] Retry ${attempt}/${MAX_RETRIES}`);
       await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
     }
 
     try {
-      return await callHuggingFace(systemPrompt, userMessage, maxTokens, temperature);
+      return await callAI(systemPrompt, userMessage, maxTokens, temperature);
     } catch (error: any) {
       lastError = error;
-      console.error(`[HF] Attempt ${attempt + 1} failed:`, error.message);
+      console.error(`[AI] Attempt ${attempt + 1} failed:`, error.message);
 
-      // Don't retry auth errors
-      if (error.message?.includes('401') || error.message?.includes('403')) {
+      // Don't retry auth errors or credit errors
+      if (error.message?.includes('401') || error.message?.includes('403') || error.message?.includes('402')) {
         break;
       }
     }
@@ -193,27 +201,29 @@ async function callWithRetry(
 
 // ============ AVAILABILITY CHECK ============
 
-let hfStatus: { available: boolean; checkedAt: number } | null = null;
+let aiStatus: { available: boolean; checkedAt: number } | null = null;
 const STATUS_CHECK_INTERVAL = 5 * 60 * 1000;
 
-export async function isHuggingFaceAvailable(): Promise<boolean> {
-  if (hfStatus && Date.now() - hfStatus.checkedAt < STATUS_CHECK_INTERVAL) {
-    return hfStatus.available;
+export async function isAIAvailable(): Promise<boolean> {
+  if (aiStatus && Date.now() - aiStatus.checkedAt < STATUS_CHECK_INTERVAL) {
+    return aiStatus.available;
   }
 
-  if (!HF_TOKEN) {
-    hfStatus = { available: false, checkedAt: Date.now() };
+  if (!AI_API_KEY) {
+    aiStatus = { available: false, checkedAt: Date.now() };
     return false;
   }
 
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10_000);
-    const response = await fetch(HF_CHAT_URL, {
+    const response = await fetch(AI_CHAT_URL, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${HF_TOKEN}`,
+        'Authorization': `Bearer ${AI_API_KEY}`,
         'Content-Type': 'application/json',
+        'HTTP-Referer': APP_URL,
+        'X-Title': APP_NAME,
       },
       body: JSON.stringify({
         model: AI_MODEL,
@@ -224,16 +234,19 @@ export async function isHuggingFaceAvailable(): Promise<boolean> {
     });
     clearTimeout(timeout);
 
-    hfStatus = { available: response.status !== 401 && response.status !== 403, checkedAt: Date.now() };
-    return hfStatus.available;
+    aiStatus = { available: response.status !== 401 && response.status !== 403 && response.status !== 402, checkedAt: Date.now() };
+    return aiStatus.available;
   } catch {
-    hfStatus = { available: false, checkedAt: Date.now() };
+    aiStatus = { available: false, checkedAt: Date.now() };
     return false;
   }
 }
 
+// Backward compatibility alias
+export const isHuggingFaceAvailable = isAIAvailable;
+
 export function isGeminiConfigured(): boolean {
-  return !!HF_TOKEN;
+  return !!AI_API_KEY;
 }
 
 // ============================================================
@@ -242,7 +255,7 @@ export function isGeminiConfigured(): boolean {
 
 /**
  * Generate an Arabic summary of a news article (2-3 sentences).
- * Uses Qwen3.5-9B via Hugging Face for high-quality Arabic output.
+ * Uses Gemini 2.0 Flash via OpenRouter for high-quality Arabic output.
  */
 export async function summarizeArticle(title: string, snippet: string): Promise<string> {
   const articleText = [title, snippet].filter(Boolean).join('\n\n');
@@ -251,11 +264,11 @@ export async function summarizeArticle(title: string, snippet: string): Promise<
   const key = cacheKey(articleText);
   const cached = summaryCache.get(key);
   if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    console.log('[HF] Summary cache HIT');
+    console.log('[AI] Summary cache HIT');
     return cached.data;
   }
 
-  if (!HF_TOKEN) {
+  if (!AI_API_KEY) {
     return fallbackSummary(title, snippet);
   }
 
@@ -267,10 +280,8 @@ export async function summarizeArticle(title: string, snippet: string): Promise<
       0.3
     );
 
-    // Clean up: remove any thinking markers if leaked
+    // Clean up: remove any unwanted prefixes
     const cleaned = summary
-      .replace(/<think[^>]*>[\s\S]*?<\/think>/gi, '')
-      .replace(/Thinking Process:([\s\S]*?)(?=\n\n|\n[A-Zأ-ي])/gi, '')
       .replace(/^\s*(摘要|Summary|ملخص)[:\s]*/i, '')
       .trim();
 
@@ -279,7 +290,7 @@ export async function summarizeArticle(title: string, snippet: string): Promise<
     summaryCache.set(key, { data: finalSummary, timestamp: Date.now() });
     return finalSummary;
   } catch (error: any) {
-    console.error('[HF] Summarization failed:', error.message);
+    console.error('[AI] Summarization failed:', error.message);
     return fallbackSummary(title, snippet);
   }
 }
@@ -326,12 +337,12 @@ export async function verifyArticle(
   const key = cacheKey(articleText + ':verify');
   const cached = qualityCache.get(key);
   if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    console.log('[HF] Quality cache HIT');
+    console.log('[AI] Quality cache HIT');
     return cached.data;
   }
 
   // Use AI if available
-  if (HF_TOKEN) {
+  if (AI_API_KEY) {
     try {
       const response = await callWithRetry(
         'أنت محلل أخبار متخصص في تقييم موثوقية الأخبار العربية. حلل الخبر التالي وأجب بالصيغة التالية فقط بدون أي نص إضافي:\n\nالدرجة: [رقم من 1 إلى 10]\nالتحليل: [جملة واحدة توضح سبب الدرجة]\n\nقواعد التقييم:\n- 9-10: خبر من مصدر رسمي موثوق مع تفاصيل محددة وأرقام\n- 7-8: خبر جيد من مصدر معروف لكن ينقصه بعض التفاصيل\n- 5-6: خبر عادي لا يوجد ما يؤكده أو ينفيه\n- 3-4: خبر مشبوه يحتوي عبارات استقطابية أو مبالغة\n- 1-2: خبر مزيف أو مضلل بوضوح\n\nلا تضف أي شيء آخر غير الدرجة والتحليل.',
@@ -346,7 +357,7 @@ export async function verifyArticle(
       qualityCache.set(key, { data: result, timestamp: Date.now() });
       return result;
     } catch (error: any) {
-      console.error('[HF] AI verification failed:', error.message);
+      console.error('[AI] AI verification failed:', error.message);
     }
   }
 
@@ -602,8 +613,8 @@ export function clearAllCaches(): void {
   summaryCache.clear();
   qualityCache.clear();
   rankCache.clear();
-  hfStatus = null;
-  console.log('[HF] All caches cleared');
+  aiStatus = null;
+  console.log('[AI] All caches cleared');
 }
 
 export function getCacheStats(): {
@@ -616,21 +627,21 @@ export function getCacheStats(): {
     summaryCacheSize: summaryCache.size,
     qualityCacheSize: qualityCache.size,
     rankCacheSize: rankCache.size,
-    isConfigured: !!HF_TOKEN,
+    isConfigured: !!AI_API_KEY,
   };
 }
 
 // ============ INIT ============
-if (!HF_TOKEN) {
+if (!AI_API_KEY) {
   console.warn(
-    '[HF] ⚠️  HUGGINGFACE_API_KEY not set.' +
+    '[AI] ⚠️  OPENROUTER_API_KEY not set.' +
     '\n     AI features will use heuristic fallback mode.' +
-    '\n     Get a free token: https://huggingface.co/settings/tokens'
+    '\n     Get a key: https://openrouter.ai/keys'
   );
 } else {
   console.log(
-    `[HF] ✅ Configured (${HF_TOKEN.substring(0, 8)}...)` +
-    `\n[HF] Model: ${AI_MODEL} (together provider)` +
-    `\n[HF] Endpoint: ${HF_CHAT_URL}`
+    `[AI] ✅ Configured (${AI_API_KEY.substring(0, 8)}...)` +
+    `\n[AI] Model: ${AI_MODEL} (via OpenRouter)` +
+    `\n[AI] Endpoint: ${AI_CHAT_URL}`
   );
 }

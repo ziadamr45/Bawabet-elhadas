@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { CATEGORIES, deduplicateArticles, getCached, setCache, NewsArticle } from '@/lib/utils';
 import { prisma } from '@/lib/prisma';
-import { isHuggingFaceAvailable, rankArticles } from '@/lib/huggingface';
+import { isAIAvailable, rankArticles } from '@/lib/ai';
 
 // ============ API KEYS ============
 const GNEWS_API_KEY = process.env.GNEWS_API_KEY || 'b72cdb0d6660d4c8f9e1473f412eba10';
@@ -132,7 +132,7 @@ export async function GET(request: NextRequest) {
     let enhanced = paginated;
     if (aiEnhance && paginated.length > 0) {
       try {
-        const available = await isHuggingFaceAvailable();
+        const available = await isAIAvailable();
         if (available) {
           const topArticles = paginated.slice(0, 5);
           const titles = topArticles.map((a) => a.title);

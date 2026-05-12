@@ -5,7 +5,7 @@
 // ============================================================
 
 import { prisma } from '@/lib/prisma';
-import { scoreArticle } from '@/lib/huggingface';
+import { scoreArticle } from '@/lib/ai';
 import { getCached, setCache } from '@/lib/utils';
 
 // ============ TYPES ============

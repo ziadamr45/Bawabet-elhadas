@@ -3,12 +3,12 @@ import {
   summarizeArticle,
   verifyArticle,
   rankArticles,
-  isHuggingFaceAvailable,
-} from '@/lib/huggingface';
+  isAIAvailable,
+} from '@/lib/ai';
 
-// ============ AI ENDPOINT (Hugging Face Powered) ============
+// ============ AI ENDPOINT (OpenRouter + Gemini 2.0 Flash) ============
 // Handles AI summarization, verification, and importance ranking
-// Uses FREE Hugging Face Inference API — no billing required
+// Uses OpenRouter API with google/gemini-2.0-flash-001
 
 export async function POST(request: NextRequest) {
   try {
