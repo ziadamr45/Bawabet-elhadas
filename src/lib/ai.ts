@@ -1,7 +1,7 @@
 // ============================================================
-// بوابة الحدث - AI System (OpenRouter + Gemini 2.0 Flash)
+// بوابة الحدث - AI System (OpenRouter)
 // Production-ready AI inference via OpenRouter API
-// Uses google/gemini-2.0-flash-001 (fast, excellent Arabic support)
+// Supports multiple models with automatic fallback
 // ============================================================
 
 // ============ CONFIGURATION ============
@@ -10,19 +10,32 @@ const AI_API_KEY = process.env.OPENROUTER_API_KEY || '';
 // OpenRouter endpoint (OpenAI-compatible chat completions)
 const AI_CHAT_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
-// Model for all AI tasks (summarization, verification, scoring)
-const AI_MODEL = 'google/gemini-2.0-flash-001';
+// Primary model (configurable via env var, defaults to deepseek-chat)
+// deepseek-chat: fast, cheap, excellent Arabic support
+const AI_MODEL = process.env.OPENROUTER_MODEL || 'deepseek/deepseek-chat';
+
+// Fallback models if primary is unavailable (e.g. region-blocked)
+const FALLBACK_MODELS = [
+  'deepseek/deepseek-chat-v3-0324',
+  'qwen/qwen3-14b',
+  'google/gemma-4-31b-it',
+];
 
 // App info for OpenRouter headers
 const APP_URL = process.env.NEXTAUTH_URL || 'http://localhost:3000';
 const APP_NAME = 'بوابة الحدث - Bawabet Elhadas';
 
 // ============ TIMEOUTS & RATE LIMITS ============
-const API_TIMEOUT_MS = 30_000;         // 30s (Gemini Flash is fast)
+const API_TIMEOUT_MS = 30_000;         // 30s
 const MAX_RETRIES = 1;                 // 1 retry on failure
 const RETRY_DELAY_MS = 2_000;          // 2s between retries
-const RATE_LIMIT_DELAY_MS = 500;       // 500ms between calls (paid tier, faster)
-const MAX_CONCURRENT_REQUESTS = 3;     // Max parallel calls (OpenRouter handles more)
+const RATE_LIMIT_DELAY_MS = 500;       // 500ms between calls
+const MAX_CONCURRENT_REQUESTS = 3;     // Max parallel calls
+
+// Track which model actually works (auto-detect on first call)
+let workingModel: string | null = null;
+let modelCheckTime = 0;
+const MODEL_CHECK_INTERVAL = 10 * 60 * 1000; // Re-check every 10 min
 
 // ============ RESPONSE TYPES ============
 interface AIChatResponse {
@@ -87,10 +100,10 @@ function releaseRequest(): void {
 // ============ CORE AI API CALLER ============
 
 /**
- * Call OpenRouter API (google/gemini-2.0-flash-001)
- * Supports chat completions with Arabic content
+ * Call OpenRouter API with a specific model
  */
-async function callAI(
+async function callAIWithModel(
+  model: string,
   systemPrompt: string,
   userMessage: string,
   maxTokens: number = 2048,
@@ -115,7 +128,7 @@ async function callAI(
         'X-Title': APP_NAME,
       },
       body: JSON.stringify({
-        model: AI_MODEL,
+        model,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userMessage },
@@ -133,7 +146,8 @@ async function callAI(
         throw new Error('Rate limited — backing off');
       }
       if (response.status === 401 || response.status === 403) {
-        throw new Error(`Authentication failed (${response.status}). Check your OPENROUTER_API_KEY.`);
+        // Region block or auth error — signal to try fallback model
+        throw new Error(`MODEL_UNAVAILABLE:${model}:${errorData.error?.message || response.status}`);
       }
       if (response.status === 402) {
         throw new Error('Insufficient credits on OpenRouter account.');
@@ -150,7 +164,7 @@ async function callAI(
     }
 
     console.log(
-      `[AI] Response OK: ${content.length} chars, ` +
+      `[AI] Response OK (${model}): ${content.length} chars, ` +
       `${data.usage?.total_tokens || '?'} tokens`
     );
 
@@ -167,7 +181,46 @@ async function callAI(
 }
 
 /**
- * Call with retry logic
+ * Call AI with automatic model fallback.
+ * Tries primary model first, then falls back to alternatives if blocked.
+ */
+async function callAI(
+  systemPrompt: string,
+  userMessage: string,
+  maxTokens: number = 2048,
+  temperature: number = 0.3
+): Promise<string> {
+  // If we already know a working model, use it directly
+  if (workingModel && Date.now() - modelCheckTime < MODEL_CHECK_INTERVAL) {
+    return callAIWithModel(workingModel, systemPrompt, userMessage, maxTokens, temperature);
+  }
+
+  // Try primary model first, then fallbacks
+  const modelsToTry = [AI_MODEL, ...FALLBACK_MODELS.filter(m => m !== AI_MODEL)];
+
+  for (const model of modelsToTry) {
+    try {
+      const result = await callAIWithModel(model, systemPrompt, userMessage, maxTokens, temperature);
+      // This model works! Remember it
+      workingModel = model;
+      modelCheckTime = Date.now();
+      console.log(`[AI] ✅ Using model: ${model}`);
+      return result;
+    } catch (error: any) {
+      if (error.message?.startsWith('MODEL_UNAVAILABLE:')) {
+        console.warn(`[AI] ⚠️ Model ${model} unavailable, trying fallback...`);
+        continue; // Try next model
+      }
+      // For other errors (timeout, rate limit), don't try other models
+      throw error;
+    }
+  }
+
+  throw new Error('All AI models unavailable. Check your OpenRouter account and region.');
+}
+
+/**
+ * Call with retry logic (retries with the same model)
  */
 async function callWithRetry(
   systemPrompt: string,
@@ -189,8 +242,8 @@ async function callWithRetry(
       lastError = error;
       console.error(`[AI] Attempt ${attempt + 1} failed:`, error.message);
 
-      // Don't retry auth errors or credit errors
-      if (error.message?.includes('401') || error.message?.includes('403') || error.message?.includes('402')) {
+      // Don't retry these
+      if (error.message?.includes('402') || error.message?.includes('All AI models unavailable')) {
         break;
       }
     }
@@ -214,32 +267,53 @@ export async function isAIAvailable(): Promise<boolean> {
     return false;
   }
 
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10_000);
-    const response = await fetch(AI_CHAT_URL, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${AI_API_KEY}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': APP_URL,
-        'X-Title': APP_NAME,
-      },
-      body: JSON.stringify({
-        model: AI_MODEL,
-        messages: [{ role: 'user', content: 'مرحبا' }],
-        max_tokens: 10,
-      }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
+  // Try to find a working model
+  const modelsToTry = [AI_MODEL, ...FALLBACK_MODELS.filter(m => m !== AI_MODEL)];
 
-    aiStatus = { available: response.status !== 401 && response.status !== 403 && response.status !== 402, checkedAt: Date.now() };
-    return aiStatus.available;
-  } catch {
-    aiStatus = { available: false, checkedAt: Date.now() };
-    return false;
+  for (const model of modelsToTry) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10_000);
+      const response = await fetch(AI_CHAT_URL, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${AI_API_KEY}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': APP_URL,
+          'X-Title': APP_NAME,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: 'user', content: 'مرحبا' }],
+          max_tokens: 10,
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+
+      if (response.ok) {
+        workingModel = model;
+        modelCheckTime = Date.now();
+        aiStatus = { available: true, checkedAt: Date.now() };
+        console.log(`[AI] ✅ Available model found: ${model}`);
+        return true;
+      }
+
+      // If 401/403 (region block), try next model
+      if (response.status === 401 || response.status === 403) {
+        continue;
+      }
+
+      // Other errors (429, 402, etc.)
+      aiStatus = { available: false, checkedAt: Date.now() };
+      return false;
+    } catch {
+      continue;
+    }
   }
+
+  aiStatus = { available: false, checkedAt: Date.now() };
+  return false;
 }
 
 // Backward compatibility alias
@@ -255,7 +329,6 @@ export function isGeminiConfigured(): boolean {
 
 /**
  * Generate an Arabic summary of a news article (2-3 sentences).
- * Uses Gemini 2.0 Flash via OpenRouter for high-quality Arabic output.
  */
 export async function summarizeArticle(title: string, snippet: string): Promise<string> {
   const articleText = [title, snippet].filter(Boolean).join('\n\n');
@@ -274,14 +347,16 @@ export async function summarizeArticle(title: string, snippet: string): Promise<
 
   try {
     const summary = await callWithRetry(
-      'أنت مساعد متخصص في تلخيص الأخبار باللغة العربية. قواعدك:\n- لخّص الخبر في 2-3 جمل مختصرة وواضحة فقط\n- لا تضف عناوين أو مقدمات أو خاتمة\n- ابدأ الملخص مباشرة بدون أي كلمات استهلالية\n- حافظ على الحقائق والأرقام المذكورة في الخبر\n- استخدم لغة عربية فصحى بسيطة',
+      'أنت مساعد متخصص في تلخيص الأخبار باللغة العربية. قواعدك:\n- لخّص الخبر في 2-3 جمل مختصرة وواضحة فقط\n- لا تضف عناوين أو مقدمات أو خاتمة\n- ابدأ الملخص مباشرة بدون أي كلمات استهلالية\n- حافظ على الحقائق والأرقام المذكورة في الخبر\n- استخدم لغة عربية فصحى بسيطة\n- لا تكرر النص الأصلي، بل أعد صياغته بشكل مختصر',
       `لخّص الخبر التالي:\n\n${articleText}`,
       2048,
       0.3
     );
 
-    // Clean up: remove any unwanted prefixes
+    // Clean up: remove any unwanted prefixes or thinking artifacts
     const cleaned = summary
+      .replace(/<think[^>]*>[\s\S]*?<\/think>/gi, '')
+      .replace(/Thinking Process:[\s\S]*?(?=\n\n|\n[A-Zأ-ي])/gi, '')
       .replace(/^\s*(摘要|Summary|ملخص)[:\s]*/i, '')
       .trim();
 
@@ -405,17 +480,14 @@ function parseVerificationResponse(response: string): { quality: number; analysi
 
 /**
  * Detect article quality using heuristic analysis.
- * Enhanced with more signals and wider score range.
  */
 export function detectQuality(title: string, snippet: string): { quality: number; analysis: string } {
   const fullText = [title, snippet].filter(Boolean).join(' ');
 
-  let score = 5; // Start neutral
+  let score = 5;
   const signals: string[] = [];
 
   // ===== POSITIVE SIGNALS =====
-
-  // Text length
   if (fullText.length > 400) {
     score += 1.5;
     signals.push('نص مفصل');
@@ -427,7 +499,6 @@ export function detectQuality(title: string, snippet: string): { quality: number
     signals.push('نص قصير جداً');
   }
 
-  // Numbers/years/dates
   const numberCount = (fullText.match(/\d+/g) || []).length;
   if (numberCount >= 5) {
     score += 1.5;
@@ -437,7 +508,6 @@ export function detectQuality(title: string, snippet: string): { quality: number
     signals.push('يحتوي أرقام وتواريخ');
   }
 
-  // Quotation marks (direct quotes)
   const quoteCount = (fullText.match(/[""«»"']/g) || []).length;
   if (quoteCount >= 4) {
     score += 1.5;
@@ -447,7 +517,6 @@ export function detectQuality(title: string, snippet: string): { quality: number
     signals.push('اقتباسات');
   }
 
-  // Location names (specific reporting)
   const locations = (fullText.match(/\b(مصر|السعودية|الإمارات|القاهرة|رياض|دبي|واشنطن|لندن|باريس|بغداد|بيروت|طرابلس|الخرطوم|دمشق|عمان|الدوحة|المنامة|الكويت|الرباط|الجزائر|تونس|نيويورك|طوكيو|موسكو|برلين)\b/gi) || []).length;
   if (locations >= 2) {
     score += 1;
@@ -457,7 +526,6 @@ export function detectQuality(title: string, snippet: string): { quality: number
     signals.push('يحتوي موقع جغرافي');
   }
 
-  // Official titles/entities
   const officials = (fullText.match(/\b(رئيس|وزير|سفير|محافظ|حكومة|برلمان|جامعة|وزارة|مجلس|قيادي|مسؤول|الرئاسة|مجلس الوزراء)\b/gi) || []).length;
   if (officials >= 2) {
     score += 1;
@@ -467,15 +535,12 @@ export function detectQuality(title: string, snippet: string): { quality: number
     signals.push('جهة رسمية');
   }
 
-  // Source mention (named source)
   if (/أفاد|قال|أوضح|أكد|صرح|أعلن|بيان|مصدر|وفقاً|حسب/i.test(fullText)) {
     score += 1;
     signals.push('ينسب لمصدر محدد');
   }
 
   // ===== NEGATIVE SIGNALS =====
-
-  // Clickbait
   const clickbaitWords = ['صادم', 'لن تصدق', 'بعد شبه', 'سر', 'الحقيقة الكاملة', 'عاجل جداً', 'ممنوع النشر', 'لأول مرة', 'شاهد الفيديو', 'قبل الحذف', 'سيجعلك تبكي', 'ما حد يتوقعه'];
   const clickbaitCount = clickbaitWords.filter(w => fullText.includes(w)).length;
   if (clickbaitCount >= 2) {
@@ -486,7 +551,6 @@ export function detectQuality(title: string, snippet: string): { quality: number
     signals.push('عبارات استقطابية');
   }
 
-  // Excessive punctuation
   const exclamations = (fullText.match(/[!؟]{2,}/g) || []).length;
   if (exclamations >= 3) {
     score -= 1.5;
@@ -495,20 +559,17 @@ export function detectQuality(title: string, snippet: string): { quality: number
     score -= 0.5;
   }
 
-  // ALL CAPS
   if (/[A-Z]{5,}/.test(fullText)) {
     score -= 0.5;
     signals.push('حروف كبيرة');
   }
 
-  // Too many emojis
   const emojiCount = (fullText.match(/[❗❓🔥💥⚡🎉😡😭🚨🆘]/g) || []).length;
   if (emojiCount > 2) {
     score -= 1;
     signals.push('رموز تعبيرية مفرطة');
   }
 
-  // Source credibility bonus
   const credibleSources = ['رويترز', 'ألمانيا', 'فرانس برس', 'سي إن إن', 'BBC', 'الأهرام', 'الجزيرة', 'المصري اليوم', 'الوفد', 'اليوم السابع'];
   for (const src of credibleSources) {
     if (fullText.includes(src)) {
@@ -518,10 +579,8 @@ export function detectQuality(title: string, snippet: string): { quality: number
     }
   }
 
-  // Clamp and round
   score = Math.round(Math.min(10, Math.max(1, score)) * 10) / 10;
 
-  // Generate analysis
   let analysis: string;
   if (score >= 8.5) {
     analysis = `خبر موثوق جداً — ${signals.join('، ')}`;
@@ -614,6 +673,7 @@ export function clearAllCaches(): void {
   qualityCache.clear();
   rankCache.clear();
   aiStatus = null;
+  workingModel = null;
   console.log('[AI] All caches cleared');
 }
 
@@ -622,12 +682,14 @@ export function getCacheStats(): {
   qualityCacheSize: number;
   rankCacheSize: number;
   isConfigured: boolean;
+  activeModel: string | null;
 } {
   return {
     summaryCacheSize: summaryCache.size,
     qualityCacheSize: qualityCache.size,
     rankCacheSize: rankCache.size,
     isConfigured: !!AI_API_KEY,
+    activeModel: workingModel,
   };
 }
 
@@ -641,7 +703,8 @@ if (!AI_API_KEY) {
 } else {
   console.log(
     `[AI] ✅ Configured (${AI_API_KEY.substring(0, 8)}...)` +
-    `\n[AI] Model: ${AI_MODEL} (via OpenRouter)` +
+    `\n[AI] Primary model: ${AI_MODEL} (via OpenRouter)` +
+    `\n[AI] Fallbacks: ${FALLBACK_MODELS.join(', ')}` +
     `\n[AI] Endpoint: ${AI_CHAT_URL}`
   );
 }
